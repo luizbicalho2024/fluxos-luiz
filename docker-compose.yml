@@ -1,0 +1,42 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fluxos-luiz-app
+    env_file:
+      - .env
+    environment:
+      DB_URI: "mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@mongo:27017/${MONGO_DATABASE}?authSource=admin"
+      DB_DATABASE: "${MONGO_DATABASE}"
+    ports:
+      - "8080:8000"
+    depends_on:
+      mongo:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "php -r '$$c=@file_get_contents(\"http://127.0.0.1:8000/up\"); exit($$c===false?1:0);'"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  mongo:
+    image: mongo:8.0
+    container_name: fluxos-luiz-mongo
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: "${MONGO_USERNAME}"
+      MONGO_INITDB_ROOT_PASSWORD: "${MONGO_PASSWORD}"
+    ports:
+      - "127.0.0.1:27018:27017"
+    volumes:
+      - fluxos_luiz_mongo:/data/db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --username \"${MONGO_USERNAME}\" --password \"${MONGO_PASSWORD}\" --authenticationDatabase admin --eval 'db.adminCommand({ping:1}).ok' | grep 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  fluxos_luiz_mongo:

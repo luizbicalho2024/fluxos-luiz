@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "2.0.0",
+  "flow": {
+    "id": "flow_exemplo",
+    "name": "Fluxo de exemplo",
+    "description": "Exemplo para validar importação no editor Laravel.",
+    "status": "draft",
+    "orientation": "LR",
+    "tags": ["exemplo"]
+  },
+  "settings": {"snapToGrid": true, "gridSize": 20, "autoLayout": false, "showMiniMap": true, "showGrid": true, "layoutPreset": "readable", "edgeRouting": "smooth", "interactivePlayback": true},
+  "viewport": {"x": 0, "y": 0, "zoom": 1},
+  "lanes": [{"id": "lane_process", "name": "Processo", "owner": "Operação", "orientation": "horizontal", "order": 1, "color": "#E8F5F0", "collapsed": false, "enabled": true, "height": 260}],
+  "nodes": [
+    {"id": "start", "type": "start", "laneId": "lane_process", "position": {"x": 100, "y": 100}, "data": {"label": "Início", "enabled": true}},
+    {"id": "task", "type": "task", "laneId": "lane_process", "position": {"x": 400, "y": 100}, "data": {"label": "Executar atividade", "owner": "Operação", "enabled": true}},
+    {"id": "end", "type": "end", "laneId": "lane_process", "position": {"x": 700, "y": 100}, "data": {"label": "Fim", "enabled": true}}
+  ],
+  "edges": [
+    {"id": "edge_1", "source": "start", "target": "task", "sourceHandle": "output", "targetHandle": "input", "enabled": true},
+    {"id": "edge_2", "source": "task", "target": "end", "sourceHandle": "output", "targetHandle": "input", "enabled": true}
+  ]
+}
