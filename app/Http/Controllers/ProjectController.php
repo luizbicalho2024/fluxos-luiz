@@ -103,7 +103,18 @@ class ProjectController extends Controller
 
     public function importBundle(Request $request)
     {
-        $u=$request->user();$data=$request->validate(['bundle'=>['required','file','max:51200'],'preserve_ids'=>['nullable','boolean']]);$result=$this->bundles->importZip(file_get_contents($data['bundle']->getRealPath()),$u->username,$u->email,$request->boolean('preserve_ids'));
+        $u=$request->user();
+        $data=$request->validate(['bundle'=>['required','file','max:51200'],'preserve_ids'=>['nullable','boolean']]);
+        try {
+            $result=$this->bundles->importZip(
+                file_get_contents($data['bundle']->getRealPath()),
+                $u->username,
+                $u->email,
+                $request->boolean('preserve_ids')
+            );
+        } catch (\InvalidArgumentException $e) {
+            return back()->withErrors(['bundle'=>$e->getMessage()]);
+        }
         return redirect()->route('projects.show',$result['project']->_id)->with('success','Projeto importado com '.count($result['flows']).' fluxo(s) e '.count($result['warnings']).' correção(ões) estrutural(is).');
     }
 

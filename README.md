@@ -1,8 +1,10 @@
 # Fluxos Luiz — Laravel + MongoDB
 
-**Versão 4.1.0 — paridade funcional completa do editor e dos projetos.**
+**Versão 4.1.1 — paridade funcional completa do editor e dos projetos.**
 
 Migração funcional do **Produto Tools 3.2.6/3.2.6.1** de Streamlit/Python para **PHP Laravel 12 + MongoDB**, preparada para execução local no **Docker Desktop**.
+
+> **Hotfix 4.1.1:** a importação de `project.zip` agora é compatível com os pacotes legados do Produto Tools (`flowId`, `file`, `defaultFlowId`), pacotes atuais do Fluxos Luiz, ZIPs com pasta raiz e JSON com BOM UTF-8. Pacotes inválidos retornam mensagem na tela de projetos em vez de erro 500.
 
 ## O que foi preservado
 
@@ -155,7 +157,7 @@ Para uma instalação nova, use `scripts/publicar-docker-github.ps1`. Para atual
 
 O atualizador de paridade:
 
-1. localiza o ZIP 4.1.0;
+1. localiza o ZIP 4.1.1;
 2. cria backup do código atual e tenta `mongodump` quando o container Mongo estiver ativo;
 3. preserva `.env` e o volume `fluxos_luiz_mongo`;
 4. atualiza a `main` local e aplica os arquivos da nova versão;

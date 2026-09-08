@@ -267,7 +267,7 @@ docker compose exec -T app php artisan route:list --except-vendor *> $null
 Ensure-Success 'Falha ao carregar as rotas Laravel.'
 Write-Host 'Laravel + MongoDB responderam corretamente.' -ForegroundColor Green
 
-Step '7/10 - Executando regressao da paridade'
+Step '7/10 - Executando regressao e teste de importacao legado'
 if (-not $SkipTests) {
     docker compose exec -T app php artisan test
     if ($LASTEXITCODE -ne 0) {
@@ -278,7 +278,7 @@ if (-not $SkipTests) {
     Write-Host 'Testes ignorados por -SkipTests.' -ForegroundColor Yellow
 }
 
-Step '8/10 - Validando recursos criticos do editor'
+Step '8/10 - Validando contratos do editor e importador'
 $editorJs=Join-Path $ProjectDir 'public\assets\flow-editor.js'
 $editorBlade=Join-Path $ProjectDir 'resources\views\flows\editor.blade.php'
 $contracts=@(
@@ -290,7 +290,13 @@ $combined=[IO.File]::ReadAllText($editorJs) + "`n" + [IO.File]::ReadAllText($edi
 foreach($contract in $contracts) {
     if (-not $combined.Contains($contract)) { throw "Contrato de paridade ausente: $contract" }
 }
-Write-Host 'Contratos principais do editor 4.1.1 validados.' -ForegroundColor Green
+$bundleService=Join-Path $ProjectDir 'app\Services\ProjectBundleService.php'
+$bundleTest=Join-Path $ProjectDir 'tests\Unit\ProjectBundleCompatibilityTest.php'
+$bundleCombined=[IO.File]::ReadAllText($bundleService) + "`n" + [IO.File]::ReadAllText($bundleTest)
+foreach($contract in @('flowId','defaultFlowId','project_entry','parseZip','ProjectBundleCompatibilityTest')) {
+    if (-not $bundleCombined.Contains($contract)) { throw "Contrato de importacao legado ausente: $contract" }
+}
+Write-Host 'Contratos principais do editor e importador 4.1.1 validados.' -ForegroundColor Green
 
 Step '9/10 - Commit e publicacao no GitHub'
 if (-not (git config user.name)) { git config user.name 'luizbicalho2024' }
@@ -299,7 +305,7 @@ if (-not (git config user.email)) { git config user.email 'luizbicalho2024@users
 git add -A
 $changes=git status --porcelain
 if ($changes) {
-    git commit -m 'feat: completar paridade funcional do Produto Tools no Laravel'
+    git commit -m 'fix: compatibilizar importacao de project.zip legado'
     Ensure-Success 'Falha ao criar commit.'
 } else {
     Write-Host 'Nenhuma alteracao nova para commit.' -ForegroundColor Yellow
@@ -333,6 +339,6 @@ if ($mongoBackup) { Write-Host "Backup Mongo  : $mongoBackup" }
 if ($localChanges) { Write-Host 'Alteracoes anteriores: preservadas em git stash.' -ForegroundColor Yellow }
 Write-Host 'Repositorio    : https://github.com/luizbicalho2024/fluxos-luiz'
 Write-Host ''
-Write-Host 'Fluxos Luiz 4.1.1 atualizado com paridade funcional do Produto Tools.' -ForegroundColor Green
+Write-Host 'Fluxos Luiz 4.1.1 atualizado com hotfix de importacao de projetos legados.' -ForegroundColor Green
 
 Remove-Item $extract -Recurse -Force -ErrorAction SilentlyContinue

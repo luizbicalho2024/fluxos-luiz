@@ -168,5 +168,5 @@ window.FLUXOS_BOOT={
   }
 };
 </script>
-<script src="{{ asset('assets/flow-editor.js') }}?v=4.1.0"></script>
+<script src="{{ asset('assets/flow-editor.js') }}?v=4.1.1"></script>
 @endpush

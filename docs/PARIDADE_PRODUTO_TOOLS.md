@@ -1,4 +1,4 @@
-# Paridade funcional Produto Tools 3.2.6.1 -> Fluxos Luiz 4.1.0
+# Paridade funcional Produto Tools 3.2.6.1 -> Fluxos Luiz 4.1.1
 
 Esta revisão completa a migração funcional para Laravel 12 + MongoDB, preservando os contratos de documento, governança, projetos e editor do Produto Tools.
 
