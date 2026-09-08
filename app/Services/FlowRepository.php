@@ -6,6 +6,8 @@ use App\Models\FlowApproval;
 use App\Models\FlowComment;
 use App\Models\FlowDraft;
 use App\Models\FlowVersion;
+use App\Models\FlowTemplate;
+use App\Models\FlowPresence;
 use App\Models\Flowchart;
 use Illuminate\Support\Str;
 
@@ -285,10 +287,112 @@ class FlowRepository
             throw new \Symfony\Component\HttpKernel\Exception\HttpException(403,'Somente o proprietário pode excluir o fluxo.');
         }
         $id=(string)$flow->_id;
-        foreach ([FlowVersion::class,FlowDraft::class,FlowComment::class,FlowApproval::class] as $model) {
+        foreach ([FlowVersion::class,FlowDraft::class,FlowComment::class,FlowApproval::class,FlowPresence::class] as $model) {
             $model::where('flowchart_id',$id)->delete();
         }
         $flow->delete();
         ActivityLogger::add($actor,'Excluiu fluxo',['flowchart_id'=>$id]);
     }
+
+    public function versions(Flowchart $flow, int $limit = 100)
+    {
+        return FlowVersion::where('flowchart_id',(string)$flow->_id)->orderBy('version','desc')->limit($limit)->get();
+    }
+
+    public function versionDocument(Flowchart $flow, int $version): ?array
+    {
+        $record=FlowVersion::where('flowchart_id',(string)$flow->_id)->where('version',$version)->first();
+        return $record ? (array)$record->document : null;
+    }
+
+    public function compareVersions(Flowchart $flow, int $left, int $right): array
+    {
+        $a=$this->versionDocument($flow,$left);$b=$this->versionDocument($flow,$right);
+        if($a===null||$b===null)throw new \InvalidArgumentException('Uma das versões selecionadas não foi encontrada.');
+        return $this->compareDocuments($a,$b);
+    }
+
+    public function compareDocuments(array $before,array $after): array
+    {
+        $keyById=function(array $items): array {$out=[];foreach($items as $item)if(is_array($item)&&isset($item['id']))$out[(string)$item['id']]=$item;return $out;};
+        $nodesBefore=$keyById((array)($before['nodes']??[]));$nodesAfter=$keyById((array)($after['nodes']??[]));
+        $edgesBefore=$keyById((array)($before['edges']??[]));$edgesAfter=$keyById((array)($after['edges']??[]));
+        $lanesBefore=$keyById((array)($before['lanes']??[]));$lanesAfter=$keyById((array)($after['lanes']??[]));
+        $changed=function(array $left,array $right): array {$ids=[];foreach(array_intersect(array_keys($left),array_keys($right)) as $id){if(json_encode($left[$id])!==json_encode($right[$id]))$ids[]=$id;}return $ids;};
+        return [
+            'summary'=>[
+                'nodes_added'=>array_values(array_diff(array_keys($nodesAfter),array_keys($nodesBefore))),
+                'nodes_removed'=>array_values(array_diff(array_keys($nodesBefore),array_keys($nodesAfter))),
+                'nodes_changed'=>$changed($nodesBefore,$nodesAfter),
+                'edges_added'=>array_values(array_diff(array_keys($edgesAfter),array_keys($edgesBefore))),
+                'edges_removed'=>array_values(array_diff(array_keys($edgesBefore),array_keys($edgesAfter))),
+                'edges_changed'=>$changed($edgesBefore,$edgesAfter),
+                'lanes_added'=>array_values(array_diff(array_keys($lanesAfter),array_keys($lanesBefore))),
+                'lanes_removed'=>array_values(array_diff(array_keys($lanesBefore),array_keys($lanesAfter))),
+                'lanes_changed'=>$changed($lanesBefore,$lanesAfter),
+                'flow_changed'=>json_encode($before['flow']??[])!==json_encode($after['flow']??[]),
+                'settings_changed'=>json_encode($before['settings']??[])!==json_encode($after['settings']??[]),
+            ],
+        ];
+    }
+
+    public function restoreVersion(Flowchart $flow,int $version,string $actor,bool $isAdmin=false): Flowchart
+    {
+        $document=$this->versionDocument($flow,$version);
+        if(!$document)throw new \InvalidArgumentException('Versão não encontrada.');
+        $document['flow']['id']=(string)$flow->_id;
+        return $this->save($document,(string)$flow->owner_username,(string)$flow->owner_email,(int)$flow->revision,$actor,true,'restore_v'.$version,$isAdmin);
+    }
+
+    public function setCollaborators(Flowchart $flow,string $actor,array $collaborators,string $visibility='private',bool $isAdmin=false): Flowchart
+    {
+        if($this->permissionFor($flow,$actor,$isAdmin)!=='owner')throw new \Symfony\Component\HttpKernel\Exception\HttpException(403,'Somente o proprietário pode alterar o compartilhamento.');
+        $clean=[];$seen=[];
+        foreach($collaborators as $item){
+            $username=strtolower(trim((string)($item['username']??'')));$level=(string)($item['level']??'viewer');
+            if($username&&$username!==strtolower((string)$flow->owner_username)&&!isset($seen[$username])&&in_array($level,self::ACCESS_LEVELS,true)){$clean[]=['username'=>$username,'level'=>$level];$seen[$username]=true;}
+        }
+        $flow->collaborators=$clean;$flow->visibility=in_array($visibility,['private','organization'],true)?$visibility:'private';$flow->updated_at=now();$flow->save();
+        ActivityLogger::add($actor,'Alterou compartilhamento de fluxo',['flowchart_id'=>(string)$flow->_id,'visibility'=>$flow->visibility,'collaborators'=>$clean]);
+        return $flow->fresh();
+    }
+
+    public function listTemplates(string $username,bool $includeAll=false)
+    {
+        $q=FlowTemplate::query();
+        if(!$includeAll)$q->where(function($x) use($username){$x->where('owner_username',$username)->orWhere('organization',true);});
+        return $q->orderBy('category')->orderBy('name')->get();
+    }
+
+    public function createTemplate(string $name,string $description,string $category,array $document,string $owner,bool $organization=false): FlowTemplate
+    {
+        $template=FlowTemplate::create([
+            '_id'=>'template_'.Str::lower(Str::random(16)),'name'=>trim($name)?:'Template','description'=>trim($description),'category'=>trim($category)?:'Geral',
+            'owner_username'=>strtolower($owner),'organization'=>$organization,'document'=>$this->documents->normalize($document,$owner),'created_at'=>now(),'updated_at'=>now(),
+        ]);
+        ActivityLogger::add($owner,'Criou template de fluxo',['template_id'=>(string)$template->_id,'name'=>$template->name]);
+        return $template;
+    }
+
+    public function deleteTemplate(string $templateId,string $actor,bool $isAdmin=false): void
+    {
+        $template=FlowTemplate::findOrFail($templateId);
+        if(!$isAdmin&&strtolower((string)$template->owner_username)!==strtolower($actor))throw new \Symfony\Component\HttpKernel\Exception\HttpException(403,'Sem permissão para excluir este template.');
+        $template->delete();ActivityLogger::add($actor,'Excluiu template de fluxo',['template_id'=>$templateId]);
+    }
+
+    public function touchPresence(Flowchart $flow,string $username,string $name=''): array
+    {
+        $id=(string)$flow->_id.':'.strtolower($username);$presence=FlowPresence::find($id)?:new FlowPresence();
+        $presence->_id=$id;$presence->flowchart_id=(string)$flow->_id;$presence->username=strtolower($username);$presence->name=$name?:$username;$presence->last_seen=now();$presence->expires_at=now()->addSeconds(75);$presence->save();
+        return $this->listPresence($flow,$username);
+    }
+
+    public function listPresence(Flowchart $flow,string $exclude=''): array
+    {
+        return FlowPresence::where('flowchart_id',(string)$flow->_id)->where('expires_at','>',now())->orderBy('last_seen','desc')->get()->filter(fn($p)=>strtolower((string)$p->username)!==strtolower($exclude))->map(fn($p)=>[
+            'username'=>(string)$p->username,'name'=>(string)($p->name?:$p->username),'last_seen'=>$p->last_seen?->toIso8601String(),
+        ])->values()->all();
+    }
+
 }

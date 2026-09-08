@@ -2,21 +2,21 @@
 @section('title','Central de Processos')
 @section('topbar','Central de Processos')
 @section('content')
-<div class="page-head"><div><h1>Central de Processos</h1><p>Crie, revise, compartilhe e publique fluxos de forma governada.</p></div></div>
-<div class="grid grid-3">
-<section class="card"><h3>Novo processo</h3><form method="post" action="{{ route('flows.store') }}" class="stack">@csrf
-<div class="field"><label>Nome</label><input name="name" required placeholder="Ex.: Aprovação comercial"></div>
-<button class="btn btn-primary" type="submit">Criar processo</button></form></section>
-<section class="card metric"><div class="label">Total acessível</div><div class="value">{{ $flows->count() }}</div><div class="small muted">Inclui processos próprios, compartilhados e da organização.</div></section>
-<section class="card metric"><div class="label">Publicados</div><div class="value">{{ $flows->where('workflow_status','published')->count() }}</div><div class="small muted">Versões formalmente publicadas.</div></section>
-</div>
-<section class="card" style="margin-top:18px"><h3>Processos</h3>
-<div class="table-wrap"><table><thead><tr><th>Processo</th><th>Status</th><th>Projeto</th><th>Proprietário</th><th>Versão</th><th>Atualizado</th><th></th></tr></thead><tbody>
-@forelse($flows as $f)<tr>
-<td><strong>{{ $f->name }}</strong><br><span class="small muted">{{ $f->description }}</span></td>
-<td><span class="badge status-{{ $f->workflow_status }}">{{ $f->workflow_status }}</span></td><td>{{ $f->project_id ?: 'Avulso' }}</td>
-<td>{{ $f->owner_username }}</td><td>v{{ $f->current_version }} · rev {{ $f->revision }}</td>
-<td>{{ optional($f->updated_at)->format('d/m/Y H:i') }}</td><td><a class="btn btn-sm" href="{{ route('flows.editor',$f->_id) }}">Abrir</a></td>
-</tr>@empty<tr><td colspan="7" class="muted">Nenhum processo encontrado.</td></tr>@endforelse
+@php
+$total=$rows->count();$published=$rows->filter(fn($x)=>$x['flow']->workflow_status==='published')->count();$review=$rows->filter(fn($x)=>$x['flow']->workflow_status==='in_review')->count();$avg=$total?round($rows->sum(fn($x)=>$x['analysis']['quality_score'])/$total):0;$open=$rows->sum('open_comments');
+@endphp
+<div class="page-head"><div><h1>Central de Processos</h1><p>Portfólio, qualidade, governança e pendências dos fluxos acessíveis ao seu usuário.</p></div><div class="actions"><a class="btn" href="{{ route('projects.index') }}">Projetos</a></div></div>
+<div class="grid grid-5"><div class="card metric"><div class="label">Processos</div><div class="value">{{ $total }}</div></div><div class="card metric"><div class="label">Publicados</div><div class="value">{{ $published }}</div></div><div class="card metric"><div class="label">Em revisão</div><div class="value">{{ $review }}</div></div><div class="card metric"><div class="label">Qualidade média</div><div class="value">{{ $avg }}/100</div></div><div class="card metric"><div class="label">Comentários abertos</div><div class="value">{{ $open }}</div></div></div>
+<div class="grid grid-3" style="margin-top:18px"><section class="card"><h3>Novo processo</h3><form method="post" action="{{ route('flows.store') }}" class="stack">@csrf<div class="field"><label>Nome</label><input name="name" required placeholder="Ex.: Aprovação comercial"></div><button class="btn btn-primary" type="submit">Criar processo</button></form></section><section class="card" style="grid-column:span 2"><h3>Filtros do portfólio</h3><div class="form-grid"><div class="field"><label>Pesquisar</label><input id="portfolioSearch" placeholder="Nome, responsável, projeto, status"></div><div class="field"><label>Status</label><select id="portfolioStatus"><option value="">Todos</option>@foreach(['draft','in_review','approved','published','archived'] as $s)<option value="{{ $s }}">{{ $s }}</option>@endforeach</select></div></div></section></div>
+<section class="card" style="margin-top:18px"><h3>Processos</h3><div class="table-wrap"><table id="portfolioTable"><thead><tr><th>Processo</th><th>Projeto</th><th>Status</th><th>Proprietário</th><th>Versão</th><th>Qualidade</th><th>Cards</th><th>Decisões</th><th>Comentários</th><th>Problemas</th><th>Atualizado</th><th></th></tr></thead><tbody>
+@forelse($rows as $row) @php($f=$row['flow']) @php($a=$row['analysis'])<tr data-search="{{ Str::lower($f->name.' '.$f->owner_username.' '.$f->workflow_status.' '.$row['project_name']) }}" data-status="{{ $f->workflow_status }}">
+<td><strong>{{ $f->name }}</strong><br><span class="small muted">{{ Str::limit($f->description,90) }}</span></td><td>{{ $row['project_name'] }}</td><td><span class="badge status-{{ $f->workflow_status }}">{{ $f->workflow_status }}</span></td><td>{{ $f->owner_username }}</td><td>v{{ $f->current_version }} · rev {{ $f->revision }}</td><td><strong>{{ $a['quality_score'] }}/100</strong></td><td>{{ $a['counts']['nodes'] }}</td><td>{{ $a['counts']['decisions'] }}</td><td>{{ $row['open_comments'] }}</td><td>{{ collect($a['issue_details']??[])->pluck('Problema')->unique()->take(3)->join(', ') ?: 'Nenhum' }}</td><td>{{ optional($f->updated_at)->format('d/m/Y H:i') }}</td><td><a class="btn btn-sm" href="{{ route('flows.editor',$f->_id) }}">Abrir</a></td></tr>
+@empty<tr><td colspan="12" class="muted">Nenhum processo encontrado.</td></tr>@endforelse
 </tbody></table></div></section>
+<section class="card" style="margin-top:18px"><h3>Entender e corrigir problemas de qualidade</h3><div class="field"><label>Processo</label><select id="qualityFlowSelect"><option value="">Selecione</option>@foreach($rows as $row)<option value="{{ $row['flow']->_id }}">{{ $row['flow']->name }}</option>@endforeach</select></div><div id="qualityDetails" style="margin-top:10px"></div></section>
 @endsection
+@push('scripts')
+<script>
+(()=>{const search=document.getElementById('portfolioSearch'),status=document.getElementById('portfolioStatus'),rows=[...document.querySelectorAll('#portfolioTable tbody tr[data-search]')];function filter(){const q=search.value.trim().toLowerCase(),s=status.value;rows.forEach(r=>r.hidden=!!((q&&!r.dataset.search.includes(q))||(s&&r.dataset.status!==s)))}search.addEventListener('input',filter);status.addEventListener('change',filter);const analyses=@json($rows->mapWithKeys(fn($row)=>[(string)$row['flow']->_id=>$row['analysis']['issue_details']??[]])->all());const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));document.getElementById('qualityFlowSelect').addEventListener('change',e=>{const items=analyses[e.target.value]||[],box=document.getElementById('qualityDetails');box.innerHTML=items.length?`<div class="table-wrap"><table><thead><tr><th>Card</th><th>Raia</th><th>Gravidade</th><th>Problema</th><th>Por que importa</th><th>Como corrigir</th></tr></thead><tbody>${items.map(i=>`<tr><td>${esc(i.Card)}</td><td>${esc(i.Raia)}</td><td>${esc(i.Gravidade)}</td><td>${esc(i.Problema)}</td><td>${esc(i['Por que importa'])}</td><td>${esc(i['Como corrigir'])}</td></tr>`).join('')}</tbody></table></div>`:'<div class="alert alert-success">Nenhum problema de qualidade identificado.</div>'})})();
+</script>
+@endpush

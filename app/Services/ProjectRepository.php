@@ -45,19 +45,18 @@ class ProjectRepository
         return $project && $this->permissionFor($project,$username,$isAdmin) ? $project : null;
     }
 
-    public function create(string $name,string $description,string $owner,string $email=''): Project
+    public function create(string $name,string $description,string $owner,string $email='',string $code='',?string $projectId=null,array $tags=[],array $settings=[]): Project
     {
         if (trim($name)==='') throw new \InvalidArgumentException('O nome do projeto é obrigatório.');
-        $id='project_'.Str::lower(Str::random(12));
+        $id=$projectId?:'project_'.Str::lower(Str::random(12));
+        $defaultSettings=['openLinkedFlowInTab'=>true,'projectPlayback'=>true,'globalSearch'=>true,'requireReleaseForPublish'=>true];
         $project=Project::create([
             '_id'=>$id,'id'=>$id,'name'=>trim($name),
-            'code'=>strtoupper(Str::slug($name,'_')),
+            'code'=>trim($code)?:strtoupper(Str::slug($name,'_')),
             'description'=>trim($description),'status'=>'draft',
             'owner_username'=>strtolower($owner),'owner_email'=>strtolower(trim($email)),
-            'visibility'=>'private','members'=>[],'default_flow_id'=>'','tags'=>[],
-            'settings'=>[
-                'openLinkedFlowInTab'=>true,'projectPlayback'=>true,'globalSearch'=>true,'requireReleaseForPublish'=>true
-            ],
+            'visibility'=>'private','members'=>[],'default_flow_id'=>'','tags'=>array_values(array_unique(array_filter(array_map('strval',$tags)))),
+            'settings'=>array_merge($defaultSettings,$settings),
             'current_release'=>0,'created_at'=>now(),'updated_at'=>now(),'last_saved_by'=>strtolower($owner),
         ]);
         ActivityLogger::add($owner,'Criou projeto',['project_id'=>$id,'name'=>$name]);
@@ -250,4 +249,54 @@ class ProjectRepository
         $project->delete();
         ActivityLogger::add($actor,'Excluiu projeto',['project_id'=>(string)$project->_id,'delete_flows'=>$deleteFlows]);
     }
+
+    public function detachFlow(Project $project,Flowchart $flow,string $actor,bool $isAdmin=false): Flowchart
+    {
+        $permission=$this->permissionFor($project,$actor,$isAdmin);
+        if(!in_array($permission,['owner','editor','reviewer','approver'],true))throw new \Symfony\Component\HttpKernel\Exception\HttpException(403,'Sem permissão para alterar o projeto.');
+        if((string)($flow->project_id??'')!==(string)$project->_id)throw new \InvalidArgumentException('O fluxo não pertence a este projeto.');
+        $doc=(array)$flow->document;foreach(['projectId','projectRole','projectGroup','projectOrder'] as $key)unset($doc['flow'][$key]);
+        $saved=$this->flows->save($doc,(string)$flow->owner_username,(string)$flow->owner_email,(int)$flow->revision,$actor,true,'project_detach',$isAdmin);
+        $saved->collaborators=[];$saved->visibility='private';$saved->save();
+        if((string)$project->default_flow_id===(string)$flow->_id){$remaining=Flowchart::where('project_id',(string)$project->_id)->where('_id','!=',(string)$flow->_id)->orderBy('project_order')->first();$project->default_flow_id=$remaining?->_id?:'';$project->save();}
+        ActivityLogger::add($actor,'Desvinculou fluxo do projeto',['project_id'=>(string)$project->_id,'flow_id'=>(string)$flow->_id]);
+        return $saved;
+    }
+
+    public function search(Project $project,string $username,string $query,bool $isAdmin=false,int $limit=100): array
+    {
+        $needle=mb_strtolower(trim($query));if($needle==='')return [];$results=[];
+        foreach($this->projectFlows($project,$username,$isAdmin) as $flow){
+            $document=(array)$flow->document;$flowText=mb_strtolower((string)$flow->name.' '.(string)$flow->description.' '.implode(' ',(array)($flow->tags??[])));
+            if(str_contains($flowText,$needle))$results[]=['kind'=>'flow','flow_id'=>(string)$flow->_id,'flow_name'=>(string)$flow->name,'target_id'=>(string)$flow->_id,'label'=>(string)$flow->name,'context'=>(string)$flow->description];
+            $laneNames=[];foreach((array)($document['lanes']??[]) as $lane)$laneNames[(string)$lane['id']]=(string)$lane['name'];
+            foreach((array)($document['nodes']??[]) as $node){$data=(array)($node['data']??[]);$text=mb_strtolower(implode(' ',[(string)($data['label']??''),(string)($data['description']??''),(string)($data['owner']??''),implode(' ',(array)($data['tags']??[])),(string)($node['id']??''),$laneNames[(string)($node['laneId']??'')]??'']));
+                if(str_contains($text,$needle))$results[]=['kind'=>'node','flow_id'=>(string)$flow->_id,'flow_name'=>(string)$flow->name,'target_id'=>(string)($node['id']??''),'label'=>(string)($data['label']??$node['id']??''),'context'=>(($laneNames[(string)($node['laneId']??'')]??'Sem raia').' · '.((string)($data['owner']??'')?:'Sem responsável'))];
+                if(count($results)>=$limit)return array_slice($results,0,$limit);
+            }
+        }
+        return array_slice($results,0,$limit);
+    }
+
+    public function shortestPath(Project $project,string $username,string $source,string $target,bool $isAdmin=false): array
+    {
+        $graph=$this->relations($project,$username,$isAdmin);$flowIds=$graph['flows']->map(fn($f)=>(string)$f->_id)->all();if(!in_array($source,$flowIds,true)||!in_array($target,$flowIds,true))return [];
+        $adj=array_fill_keys($flowIds,[]);foreach($graph['links'] as $link)if(isset($adj[$link['source_flow_id']])&&in_array($link['target_flow_id'],$flowIds,true))$adj[$link['source_flow_id']][]=$link['target_flow_id'];
+        $queue=[[$source,[$source]]];$seen=[];while($queue){[$current,$path]=array_shift($queue);if($current===$target)return $path;if(isset($seen[$current]))continue;$seen[$current]=true;foreach($adj[$current]??[] as $next)if(!isset($seen[$next]))$queue[]=[$next,[...$path,$next]];}
+        return [];
+    }
+
+    public function impact(Project $project,string $username,string $changedFlowId,bool $isAdmin=false): array
+    {
+        $graph=$this->relations($project,$username,$isAdmin);return array_values(array_filter($graph['links'],fn($link)=>(string)$link['target_flow_id']===$changedFlowId));
+    }
+
+    public function removeFlowReferences(Project $project,string $targetFlowId,string $actor,bool $isAdmin=false): int
+    {
+        $changed=0;foreach($this->projectFlows($project,$actor,$isAdmin) as $flow){if((string)$flow->_id===$targetFlowId)continue;$doc=(array)$flow->document;$touched=false;
+            foreach($doc['nodes']??[] as &$node){if((string)($node['data']['linkedFlowId']??'')!==$targetFlowId)continue;$node['data']['linkedFlowId']=null;$node['data']['linkedFlowEntryNodeId']=null;$node['data']['linkedFlowExitNodeId']=null;$touched=true;}unset($node);
+            if($touched){$this->flows->save($doc,(string)$flow->owner_username,(string)$flow->owner_email,(int)$flow->revision,$actor,true,'remove_deleted_flow_reference',$isAdmin);$changed++;}
+        }return $changed;
+    }
+
 }

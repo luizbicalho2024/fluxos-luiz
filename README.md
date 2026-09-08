@@ -1,5 +1,7 @@
 # Fluxos Luiz — Laravel + MongoDB
 
+**Versão 4.1.0 — paridade funcional completa do editor e dos projetos.**
+
 Migração funcional do **Produto Tools 3.2.6/3.2.6.1** de Streamlit/Python para **PHP Laravel 12 + MongoDB**, preparada para execução local no **Docker Desktop**.
 
 ## O que foi preservado
@@ -8,11 +10,12 @@ Migração funcional do **Produto Tools 3.2.6/3.2.6.1** de Streamlit/Python para
 - papéis globais `user`, `head_comercial` e `admin`;
 - Gestão de Acesso, com proteção do último administrador ativo;
 - Central de Processos;
-- editor visual com raias, cards, decisões, subprocessos, conexões, zoom, enquadramento, importação e exportação JSON;
+- editor visual profissional com 10 tipos de cards, raias dinâmicas, seleção múltipla, undo/redo, alinhamento/distribuição, zoom/pan/fullscreen, minimapa, busca, filtros de visão, roteamento avançado e Play interativo;
 - importação resiliente: decisão com menos de duas saídas é convertida em atividade, sem inventar regra de negócio;
 - rascunho explícito por usuário, sem autosave oculto;
 - controle otimista por `revision`, evitando sobrescrita silenciosa em edição concorrente;
 - histórico de versões e hash SHA-256 do documento;
+- comparação/restauração de versões e resolução completa de conflitos de edição (servidor, cópia ou sobrescrita segura);
 - governança `draft → in_review → approved → published`, além de arquivar/reabrir;
 - permissões `viewer`, `editor`, `reviewer`, `approver` e proprietário;
 - comentários vinculados ao fluxo/card/conexão;
@@ -20,6 +23,9 @@ Migração funcional do **Produto Tools 3.2.6/3.2.6.1** de Streamlit/Python para
 - vínculos entre subprocessos por `linkedFlowId`, `linkedFlowEntryNodeId` e `linkedFlowExitNodeId`;
 - análise de vínculos quebrados, fluxos órfãos, ciclos e qualidade;
 - mapa interativo de relações;
+- busca global, execução guiada entre fluxos, menor caminho e análise de impacto;
+- exportações JSON, SVG, PNG, PDF, HTML, CSV e pacote ZIP completo;
+- biblioteca de templates internos e templates customizados;
 - releases consolidadas com snapshot de revisão/versão/hash de cada fluxo;
 - tema claro/escuro persistido no perfil do usuário.
 
@@ -138,18 +144,24 @@ routes/web.php
 docker-compose.yml
 Dockerfile
 scripts/publicar-docker-github.ps1
+scripts/atualizar-paridade-completa.ps1
+VERSION
+docs/PARIDADE_PRODUTO_TOOLS.md
 ```
 
 ## Publicação
 
-O script `scripts/publicar-docker-github.ps1` foi feito para:
+Para uma instalação nova, use `scripts/publicar-docker-github.ps1`. Para atualizar uma instalação já existente sem perder o MongoDB, use `scripts/atualizar-paridade-completa.ps1`.
 
-1. localizar este projeto (ou o ZIP baixado);
-2. clonar/atualizar `https://github.com/luizbicalho2024/fluxos-luiz.git`;
-3. gerar `.env` com segredos locais quando necessário;
-4. iniciar o Docker Desktop se necessário;
-5. executar `docker compose up -d --build`;
-6. validar `/up` e o estado dos containers;
-7. fazer commit e `push` da versão para `main`.
+O atualizador de paridade:
+
+1. localiza o ZIP 4.1.0;
+2. cria backup do código atual e tenta `mongodump` quando o container Mongo estiver ativo;
+3. preserva `.env` e o volume `fluxos_luiz_mongo`;
+4. atualiza a `main` local e aplica os arquivos da nova versão;
+5. executa `docker compose down --remove-orphans` **sem `-v`** e reconstrói os containers;
+6. valida `/up`, índices MongoDB, rotas e a suíte `php artisan test`;
+7. valida contratos críticos do editor;
+8. cria commit e `push` para `main`.
 
 O `.env` permanece somente na máquina local.

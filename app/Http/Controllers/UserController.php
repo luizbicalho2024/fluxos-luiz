@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\User;
+use App\Models\ActivityLog;
 use App\Services\ActivityLogger;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
@@ -13,7 +14,8 @@ class UserController extends Controller
     public function index()
     {
         $users=User::orderBy('name')->get();
-        return view('users.index',compact('users'));
+        $logs=ActivityLog::orderBy('timestamp','desc')->limit(500)->get();
+        return view('users.index',compact('users','logs'));
     }
 
     public function store(Request $request)
@@ -22,7 +24,7 @@ class UserController extends Controller
             'username'=>['required','string','max:80'],
             'name'=>['required','string','max:150'],
             'email'=>['required','email','max:180'],
-            'password'=>['required','string','min:10'],
+            'password'=>['required','string','min:8'],
             'role'=>['required',Rule::in(['user','head_comercial','admin'])],
         ]);
         $username=strtolower(trim($data['username']));
@@ -43,9 +45,10 @@ class UserController extends Controller
         $data=$request->validate([
             'name'=>['required','string','max:150'],'email'=>['required','email','max:180'],
             'role'=>['required',Rule::in(['user','head_comercial','admin'])],
-            'active'=>['nullable','boolean'],'password'=>['nullable','string','min:10'],
+            'active'=>['nullable','boolean'],'password'=>['nullable','string','min:8'],
         ]);
         $active=$request->boolean('active');
+        if($user->username===$request->user()->username && !$active)return back()->withErrors(['user'=>'Você não pode desativar a própria conta durante a sessão.']);
         if($user->role==='admin' && (!$active || $data['role']!=='admin') && User::where('role','admin')->where('active',true)->count()<=1){
             return back()->withErrors(['user'=>'Não é permitido remover o último administrador ativo.']);
         }

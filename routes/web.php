@@ -23,20 +23,42 @@ Route::middleware('auth')->group(function(){
     Route::delete('/processos/{id}',[FlowController::class,'destroy'])->name('flows.destroy');
 
     Route::post('/api/processos/{id}/salvar',[FlowController::class,'save'])->name('flows.save');
+    Route::post('/api/processos/{id}/resolver-conflito',[FlowController::class,'resolveConflict'])->name('flows.conflict.resolve');
     Route::post('/api/processos/{id}/rascunho',[FlowController::class,'saveDraft'])->name('flows.draft.save');
     Route::delete('/api/processos/{id}/rascunho',[FlowController::class,'discardDraft'])->name('flows.draft.discard');
     Route::post('/api/processos/{id}/governanca',[FlowController::class,'transition'])->name('flows.transition');
     Route::post('/api/processos/{id}/comentarios',[FlowController::class,'comment'])->name('flows.comment');
     Route::patch('/api/comentarios/{commentId}',[FlowController::class,'resolveComment'])->name('comments.resolve');
     Route::post('/api/processos/{id}/importar',[FlowController::class,'import'])->name('flows.import');
+    Route::post('/api/processos/{id}/validar',[FlowController::class,'validateDocument'])->name('flows.validate');
+    Route::post('/api/processos/{id}/analisar',[FlowController::class,'analyzeDocument'])->name('flows.analyze');
+    Route::get('/api/processos/{id}/versoes/{version}',[FlowController::class,'version'])->whereNumber('version')->name('flows.version');
+    Route::post('/api/processos/{id}/comparar-versoes',[FlowController::class,'compareVersions'])->name('flows.versions.compare');
+    Route::post('/api/processos/{id}/restaurar/{version}',[FlowController::class,'restoreVersion'])->whereNumber('version')->name('flows.version.restore');
+    Route::post('/api/processos/{id}/compartilhamento',[FlowController::class,'sharing'])->name('flows.sharing');
+    Route::post('/api/processos/{id}/presenca',[FlowController::class,'presence'])->name('flows.presence');
+    Route::post('/api/processos/{id}/templates',[FlowController::class,'createTemplate'])->name('flows.templates.store');
+    Route::delete('/api/templates/{templateId}',[FlowController::class,'deleteTemplate'])->name('templates.destroy');
+    Route::post('/api/templates/criar-processo',[FlowController::class,'createFromTemplate'])->name('templates.create-flow');
+    Route::post('/api/processos/{id}/exportar/{format}',[FlowController::class,'export'])
+        ->where('format','svg|pdf|documentation-pdf|html|nodes-csv|raci-csv|bundle')
+        ->name('flows.export');
 
     Route::get('/projetos',[ProjectController::class,'index'])->name('projects.index');
     Route::post('/projetos',[ProjectController::class,'store'])->name('projects.store');
+    Route::post('/projetos/importar-pacote',[ProjectController::class,'importBundle'])->name('projects.import.bundle');
+    Route::post('/projetos/importar-jsons',[ProjectController::class,'importDocuments'])->name('projects.import.jsons');
+    Route::get('/projetos/{id}/exportar',[ProjectController::class,'exportBundle'])->name('projects.export');
     Route::get('/projetos/{id}',[ProjectController::class,'show'])->name('projects.show');
     Route::put('/projetos/{id}',[ProjectController::class,'update'])->name('projects.update');
     Route::post('/projetos/{id}/participantes',[ProjectController::class,'members'])->name('projects.members');
     Route::post('/projetos/{id}/fluxos',[ProjectController::class,'assign'])->name('projects.assign');
+    Route::delete('/projetos/{id}/fluxos/{flowId}',[ProjectController::class,'detach'])->name('projects.detach');
     Route::post('/projetos/{id}/releases',[ProjectController::class,'release'])->name('projects.release');
+    Route::get('/api/projetos/{id}/releases/{version}',[ProjectController::class,'releaseData'])->whereNumber('version')->name('projects.release.data');
+    Route::get('/api/projetos/{id}/buscar',[ProjectController::class,'search'])->name('projects.search');
+    Route::post('/api/projetos/{id}/caminho',[ProjectController::class,'path'])->name('projects.path');
+    Route::get('/api/projetos/{id}/impacto/{flowId}',[ProjectController::class,'impact'])->name('projects.impact');
     Route::delete('/projetos/{id}',[ProjectController::class,'destroy'])->name('projects.destroy');
 
     Route::get('/mapa-relacoes/{projectId}',[RelationController::class,'show'])->name('relations.show');

@@ -2,13 +2,19 @@
   "name": "luizbicalho2024/fluxos-luiz",
   "type": "project",
   "description": "Migração do Produto Tools para Laravel + MongoDB",
-  "keywords": ["laravel", "mongodb", "processos", "fluxos"],
+  "keywords": [
+    "laravel",
+    "mongodb",
+    "processos",
+    "fluxos"
+  ],
   "license": "MIT",
   "require": {
     "php": "^8.3",
     "laravel/framework": "^12.0",
     "laravel/tinker": "^2.10",
-    "mongodb/laravel-mongodb": "^5.8"
+    "mongodb/laravel-mongodb": "^5.8",
+    "dompdf/dompdf": "^3.1"
   },
   "require-dev": {
     "fakerphp/faker": "^1.24",
@@ -16,13 +22,33 @@
     "nunomaduro/collision": "^8.6",
     "phpunit/phpunit": "^11.5"
   },
-  "autoload": {"psr-4": {"App\\": "app/"}},
-  "autoload-dev": {"psr-4": {"Tests\\": "tests/"}},
-  "scripts": {
-    "post-autoload-dump": ["Illuminate\\Foundation\\ComposerScripts::postAutoloadDump", "@php artisan package:discover --ansi"],
-    "post-create-project-cmd": ["@php artisan key:generate --ansi"]
+  "autoload": {
+    "psr-4": {
+      "App\\": "app/"
+    }
   },
-  "config": {"optimize-autoloader": true, "preferred-install": "dist", "sort-packages": true, "allow-plugins": {"php-http/discovery": true}},
+  "autoload-dev": {
+    "psr-4": {
+      "Tests\\": "tests/"
+    }
+  },
+  "scripts": {
+    "post-autoload-dump": [
+      "Illuminate\\Foundation\\ComposerScripts::postAutoloadDump",
+      "@php artisan package:discover --ansi"
+    ],
+    "post-create-project-cmd": [
+      "@php artisan key:generate --ansi"
+    ]
+  },
+  "config": {
+    "optimize-autoloader": true,
+    "preferred-install": "dist",
+    "sort-packages": true,
+    "allow-plugins": {
+      "php-http/discovery": true
+    }
+  },
   "minimum-stability": "stable",
   "prefer-stable": true
 }

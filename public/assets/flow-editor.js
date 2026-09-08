@@ -4,438 +4,386 @@
   const boot = window.FLUXOS_BOOT;
   if (!boot) return;
 
-  const csrf = document.querySelector('meta[name="csrf-token"]').content;
-  const stage = document.getElementById('editorStage');
-  const world = document.getElementById('flowWorld');
-  const lanesLayer = document.getElementById('lanesLayer');
-  const nodesLayer = document.getElementById('nodesLayer');
-  const edgeLayer = document.getElementById('edgeLayer');
-  const statusEl = document.getElementById('editorStatus');
+  const NODE_TYPES = {
+    start: {label:'Início',description:'Ponto inicial',icon:'▶',color:'#059669',soft:'#d1fae5'},
+    end: {label:'Fim',description:'Encerramento',icon:'■',color:'#dc2626',soft:'#fee2e2'},
+    task: {label:'Atividade',description:'Etapa do processo',icon:'✓',color:'#2563eb',soft:'#dbeafe'},
+    decision: {label:'Decisão',description:'Regra ou condição',icon:'◇',color:'#d97706',soft:'#fef3c7'},
+    subprocess: {label:'Subprocesso',description:'Fluxo interno',icon:'▣',color:'#7c3aed',soft:'#ede9fe'},
+    event: {label:'Evento',description:'Evento intermediário',icon:'●',color:'#0891b2',soft:'#cffafe'},
+    wait: {label:'Espera',description:'Prazo ou dependência',icon:'◷',color:'#475569',soft:'#e2e8f0'},
+    document: {label:'Documento',description:'Entrada ou saída',icon:'▤',color:'#0f766e',soft:'#ccfbf1'},
+    api: {label:'Integração',description:'Sistema ou API',icon:'⇄',color:'#9333ea',soft:'#f3e8ff'},
+    note: {label:'Observação',description:'Nota explicativa',icon:'✎',color:'#ca8a04',soft:'#fef9c3'},
+  };
+  const WORLD_WIDTH = 4400;
+  const WORLD_HEIGHT = 3000;
+  const NODE_W = 190;
+  const NODE_H = 86;
+  const LANE_HEADER = 42;
+  const LANE_CONTENT_TOP = 72;
+  const ROW_GAP = 112;
+  const MIN_ZOOM = .08;
+  const MAX_ZOOM = 2.2;
+  const EXCEPTION_WORDS = ['erro','falha','recus','cancel','bloque','expir','indispon','pendente','corrigir','reprocess','exceção','excecao'];
 
-  let doc = structuredClone(boot.document || {});
-  let revision = Number(boot.revision || 1);
-  let selectedNodeId = null;
-  let selectedEdgeId = null;
-  let connectSource = null;
-  let dirty = false;
-  let scale = 1;
-  let drag = null;
+  const csrf = document.querySelector('meta[name="csrf-token"]')?.content || '';
+  const $ = (id) => document.getElementById(id);
+  const q = (selector, root=document) => root.querySelector(selector);
+  const qa = (selector, root=document) => [...root.querySelectorAll(selector)];
+  const clone = (x) => JSON.parse(JSON.stringify(x ?? null));
+  const esc = (x) => String(x ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+  const uid = (prefix) => `${prefix}_${(crypto.randomUUID?.() || (Date.now().toString(36)+Math.random().toString(36).slice(2))).replaceAll('-','').slice(0,12)}`;
+  const clamp = (v,min,max) => Math.min(max,Math.max(min,v));
+  const nowIso = () => new Date().toISOString();
+  const isInput = (el) => !!el?.closest?.('input,textarea,select,[contenteditable="true"]');
 
-  const $ = id => document.getElementById(id);
-  const uid = prefix => `${prefix}_${crypto.randomUUID().replaceAll('-','').slice(0,10)}`;
-  const nodeById = id => (doc.nodes || []).find(n => n.id === id);
-  const edgeById = id => (doc.edges || []).find(e => e.id === id);
-  const laneById = id => (doc.lanes || []).find(l => l.id === id);
+  const stage = $('editorStage');
+  const world = $('flowWorld');
+  const lanesLayer = $('lanesLayer');
+  const nodesLayer = $('nodesLayer');
+  const edgeLayer = $('edgeLayer');
+  const props = $('propertiesBody');
+  const selectionBox = $('selectionBox');
+  const minimap = $('minimap');
 
-  function markDirty(message='Alterações não salvas') {
-    dirty = true;
-    statusEl.textContent = message;
-    statusEl.classList.add('dirty');
-    statusEl.classList.remove('saved');
-  }
-  function markSaved(message='Salvo') {
-    dirty = false;
-    statusEl.textContent = message;
-    statusEl.classList.remove('dirty');
-    statusEl.classList.add('saved');
-    setTimeout(() => {
-      if (!dirty) {
-        statusEl.textContent = 'Sem alterações';
-        statusEl.classList.remove('saved');
-      }
-    }, 2500);
-  }
-  function notify(message, type='info') {
-    statusEl.textContent = message;
-    statusEl.classList.toggle('dirty', type === 'error');
-    statusEl.classList.toggle('saved', type === 'success');
-  }
-
-  async function api(url, method='POST', body=null) {
-    const options = {
-      method,
-      headers: {'Accept':'application/json','X-CSRF-TOKEN':csrf,'X-Requested-With':'XMLHttpRequest'}
-    };
-    if (body !== null) {
-      options.headers['Content-Type'] = 'application/json';
-      options.body = JSON.stringify(body);
-    }
-    const response = await fetch(url, options);
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const error = new Error(data.message || data.error || `HTTP ${response.status}`);
-      error.response = response;
-      error.data = data;
-      throw error;
-    }
-    return data;
-  }
-
-  function laneLayout() {
-    let y = 20;
-    const map = new Map();
-    [...(doc.lanes || [])].sort((a,b)=>(a.order||0)-(b.order||0)).forEach((lane, i) => {
-      const h = Math.max(110, Math.min(1600, Number(lane.height || 240)));
-      map.set(lane.id, {y, h, order:i});
-      y += h + 18;
+  function normalizeDocument(input) {
+    const doc = clone(input || {}) || {};
+    doc.schemaVersion = '2.0.0';
+    doc.flow ||= {};
+    doc.flow.id ||= boot.flowId || uid('flow');
+    doc.flow.name ||= 'Novo processo';
+    doc.flow.description ||= '';
+    doc.flow.status ||= boot.status || 'draft';
+    doc.flow.orientation = ['LR','RL'].includes(doc.flow.orientation) ? doc.flow.orientation : 'LR';
+    doc.flow.tags = Array.isArray(doc.flow.tags) ? doc.flow.tags : [];
+    doc.flow.createdAt ||= nowIso();
+    doc.flow.updatedAt ||= nowIso();
+    doc.settings = {snapToGrid:true,gridSize:20,autoLayout:false,showMiniMap:true,showGrid:true,layoutPreset:'readable',edgeRouting:'smooth',interactivePlayback:true,autoFitLanes:true,...(doc.settings||{})};
+    const routeAliases = {step:'orthogonal',smoothstep:'smooth',bezier:'smooth',curve:'smooth'};
+    doc.settings.edgeRouting = routeAliases[String(doc.settings.edgeRouting||'').toLowerCase()] || String(doc.settings.edgeRouting||'smooth').toLowerCase();
+    if (!['smooth','straight','orthogonal','corridor','corridor-v2'].includes(doc.settings.edgeRouting)) doc.settings.edgeRouting = 'smooth';
+    doc.viewport = {x:0,y:0,zoom:1,...(doc.viewport||{})};
+    doc.lanes = Array.isArray(doc.lanes) ? doc.lanes : [];
+    if (!doc.lanes.length) doc.lanes.push({id:'lane_process',name:'Processo',owner:'',order:1,color:'#E8F5F0',collapsed:false,enabled:true,height:260});
+    doc.lanes.forEach((lane,i)=>{
+      lane.id ||= uid('lane'); lane.name ||= `Raia ${i+1}`; lane.owner ||= ''; lane.order = Number.isFinite(+lane.order)?+lane.order:i+1;
+      lane.color ||= '#E8F5F0'; lane.collapsed = lane.collapsed === true; lane.enabled = lane.enabled !== false; lane.height = clamp(+lane.height||260,110,1800);
     });
-    return {map, total:y+100};
-  }
-
-  function ensureNodeInLane(node) {
-    if (!node.laneId || !laneById(node.laneId)) node.laneId = doc.lanes?.[0]?.id || null;
-  }
-
-  function render() {
-    const layout = laneLayout();
-    world.style.transform = `scale(${scale})`;
-    world.style.width = '2200px';
-    world.style.height = `${Math.max(1600, layout.total)}px`;
-
-    lanesLayer.innerHTML = '';
-    for (const lane of doc.lanes || []) {
-      const p = layout.map.get(lane.id);
-      const el = document.createElement('div');
-      el.className = 'lane';
-      el.style.top = `${p.y}px`;
-      el.style.height = `${p.h}px`;
-      el.style.background = `color-mix(in srgb, ${lane.color || '#E8F5F0'} 22%, transparent)`;
-      el.innerHTML = `<div class="lane-title">${escapeHtml(lane.name || 'Raia')} · ${escapeHtml(lane.owner || '')}</div>`;
-      lanesLayer.appendChild(el);
-    }
-
-    nodesLayer.innerHTML = '';
-    for (const node of doc.nodes || []) {
-      ensureNodeInLane(node);
-      const el = document.createElement('div');
-      el.className = `node${selectedNodeId === node.id ? ' selected' : ''}`;
-      el.dataset.nodeId = node.id;
-      el.dataset.type = node.type || 'task';
-      el.style.left = `${Number(node.position?.x || 0)}px`;
-      el.style.top = `${Number(node.position?.y || 0)}px`;
-      el.innerHTML = `
-        <div class="node-type">${escapeHtml(node.type || 'task')}</div>
-        <div class="node-label">${escapeHtml(node.data?.label || node.id)}</div>
-        <div class="node-owner">${escapeHtml(node.data?.owner || 'Sem responsável')}</div>`;
-      el.addEventListener('mousedown', startDrag);
-      el.addEventListener('click', e => {
-        e.stopPropagation();
-        selectNode(node.id);
-      });
-      nodesLayer.appendChild(el);
-    }
-
-    renderEdges();
-    refreshInspector();
-  }
-
-  function renderEdges() {
-    edgeLayer.innerHTML = `
-      <defs>
-        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-          <path d="M 0 0 L 10 5 L 0 10 z" fill="#7c8ca1"></path>
-        </marker>
-      </defs>`;
-    for (const edge of doc.edges || []) {
-      const source = nodeById(edge.source);
-      const target = nodeById(edge.target);
-      if (!source || !target) continue;
-      const x1 = Number(source.position?.x || 0) + 190;
-      const y1 = Number(source.position?.y || 0) + 40;
-      const x2 = Number(target.position?.x || 0);
-      const y2 = Number(target.position?.y || 0) + 40;
-      const mid = Math.max(50, Math.abs(x2-x1)*0.45);
-      const d = `M ${x1} ${y1} C ${x1+mid} ${y1}, ${x2-mid} ${y2}, ${x2} ${y2}`;
-
-      const path = document.createElementNS('http://www.w3.org/2000/svg','path');
-      path.setAttribute('d',d);
-      path.setAttribute('marker-end','url(#arrow)');
-      path.style.pointerEvents = 'stroke';
-      path.style.cursor = 'pointer';
-      path.style.stroke = selectedEdgeId === edge.id ? 'var(--primary)' : edgeColor(edge);
-      path.style.strokeWidth = selectedEdgeId === edge.id ? '4' : '2';
-      path.addEventListener('click', e => {e.stopPropagation(); selectEdge(edge.id);});
-      edgeLayer.appendChild(path);
-
-      const label = edge.label || edge.condition || '';
-      if (label) {
-        const text = document.createElementNS('http://www.w3.org/2000/svg','text');
-        text.textContent = label;
-        text.setAttribute('x', String((x1+x2)/2));
-        text.setAttribute('y', String((y1+y2)/2 - 7));
-        text.setAttribute('text-anchor','middle');
-        edgeLayer.appendChild(text);
-      }
-    }
-  }
-
-  function edgeColor(edge) {
-    const source = nodeById(edge.source);
-    if (source?.type === 'decision') {
-      const text = `${edge.label || ''} ${edge.condition || ''}`.toLowerCase();
-      if (/\b(sim|yes|aprov|ok|verdadeiro)\b/.test(text)) return '#12b76a';
-      if (/\b(não|nao|no|reprov|falso)\b/.test(text)) return '#f04438';
-    }
-    return '#7c8ca1';
-  }
-
-  function startDrag(e) {
-    if (e.button !== 0) return;
-    const id = e.currentTarget.dataset.nodeId;
-    const node = nodeById(id);
-    if (!node || node.data?.locked) return;
-    selectNode(id);
-    drag = {id, startX:e.clientX, startY:e.clientY, x:Number(node.position.x||0), y:Number(node.position.y||0)};
-    e.preventDefault();
-  }
-  window.addEventListener('mousemove', e => {
-    if (!drag) return;
-    const node = nodeById(drag.id);
-    if (!node) return;
-    const grid = doc.settings?.snapToGrid ? Number(doc.settings?.gridSize || 20) : 1;
-    let x = drag.x + (e.clientX-drag.startX)/scale;
-    let y = drag.y + (e.clientY-drag.startY)/scale;
-    if (grid > 1) {x = Math.round(x/grid)*grid; y = Math.round(y/grid)*grid;}
-    node.position = {x:Math.max(0,x),y:Math.max(0,y)};
-    markDirty();
-    render();
-  });
-  window.addEventListener('mouseup',()=>drag=null);
-
-  function selectNode(id) {
-    selectedNodeId = id;
-    selectedEdgeId = null;
-    render();
-  }
-  function selectEdge(id) {
-    selectedEdgeId = id;
-    selectedNodeId = null;
-    render();
-  }
-  stage.addEventListener('click', e => {
-    if (e.target === stage || e.target === world || e.target === lanesLayer || e.target === nodesLayer || e.target === edgeLayer) {
-      selectedNodeId = null; selectedEdgeId = null; render();
-    }
-  });
-
-  function refreshInspector() {
-    $('flowName').value = doc.flow?.name || '';
-    $('flowDescription').value = doc.flow?.description || '';
-
-    const node = selectedNodeId ? nodeById(selectedNodeId) : null;
-    $('nodeInspector').hidden = !node;
-    $('nodeInspectorEmpty').hidden = !!node;
-    if (node) {
-      $('nodeType').value = node.type || 'task';
-      $('nodeLabel').value = node.data?.label || '';
-      $('nodeDescription').value = node.data?.description || '';
-      $('nodeOwner').value = node.data?.owner || '';
-      $('nodeCriticality').value = node.data?.criticality || 'medium';
-      $('nodeTags').value = (node.data?.tags || []).join(', ');
-      $('nodeLinkedFlow').value = node.data?.linkedFlowId || '';
-      $('nodeLinkedEntry').value = node.data?.linkedFlowEntryNodeId || '';
-      $('nodeLinkedExit').value = node.data?.linkedFlowExitNodeId || '';
-      $('nodeLane').innerHTML = (doc.lanes || []).map(l=>`<option value="${attr(l.id)}"${l.id===node.laneId?' selected':''}>${escapeHtml(l.name)}</option>`).join('');
-    }
-
-    const edge = selectedEdgeId ? edgeById(selectedEdgeId) : null;
-    $('edgeInspector').hidden = !edge;
-    $('edgeInspectorEmpty').hidden = !!edge;
-    if (edge) {
-      $('edgeLabel').value = edge.label || '';
-      $('edgeCondition').value = edge.condition || '';
-    }
-  }
-
-  function bindValue(id, apply) {
-    $(id)?.addEventListener('input', e => {apply(e.target.value); markDirty(); render();});
-  }
-  bindValue('flowName',v=>doc.flow.name=v);
-  bindValue('flowDescription',v=>doc.flow.description=v);
-  bindValue('nodeType',v=>{const n=nodeById(selectedNodeId);if(n)n.type=v});
-  bindValue('nodeLabel',v=>{const n=nodeById(selectedNodeId);if(n)n.data.label=v});
-  bindValue('nodeDescription',v=>{const n=nodeById(selectedNodeId);if(n)n.data.description=v});
-  bindValue('nodeOwner',v=>{const n=nodeById(selectedNodeId);if(n)n.data.owner=v});
-  bindValue('nodeLane',v=>{const n=nodeById(selectedNodeId);if(n)n.laneId=v});
-  bindValue('nodeCriticality',v=>{const n=nodeById(selectedNodeId);if(n)n.data.criticality=v});
-  bindValue('nodeTags',v=>{const n=nodeById(selectedNodeId);if(n)n.data.tags=v.split(',').map(x=>x.trim()).filter(Boolean)});
-  bindValue('nodeLinkedFlow',v=>{const n=nodeById(selectedNodeId);if(n)n.data.linkedFlowId=v||null});
-  bindValue('nodeLinkedEntry',v=>{const n=nodeById(selectedNodeId);if(n)n.data.linkedFlowEntryNodeId=v||null});
-  bindValue('nodeLinkedExit',v=>{const n=nodeById(selectedNodeId);if(n)n.data.linkedFlowExitNodeId=v||null});
-  bindValue('edgeLabel',v=>{const e=edgeById(selectedEdgeId);if(e)e.label=v});
-  bindValue('edgeCondition',v=>{const e=edgeById(selectedEdgeId);if(e)e.condition=v});
-
-  $('addNodeBtn').addEventListener('click',()=>{
-    const type=$('nodeTypeSelect').value;
-    const lane=doc.lanes?.[0];
-    const layout=laneLayout().map.get(lane?.id);
-    const x=(stage.scrollLeft + 280)/scale;
-    const y=Math.max((layout?.y||20)+60,(stage.scrollTop + 160)/scale);
-    const id=uid('node');
-    doc.nodes.push({
-      id,type,laneId:lane?.id||null,position:{x,y},
-      data:{label:type==='task'?'Nova atividade':type.charAt(0).toUpperCase()+type.slice(1),description:'',owner:'',enabled:true,locked:false,slaMinutes:null,tags:[],level:type==='api'?'technical':'operational',category:'process',criticality:'medium',linkedFlowId:null,linkedFlowEntryNodeId:null,linkedFlowExitNodeId:null,preferredEdgeId:null,documentationUrl:'',raci:{responsible:'',accountable:'',consulted:[],informed:[]}}
+    doc.nodes = Array.isArray(doc.nodes) ? doc.nodes : [];
+    doc.nodes.forEach(node=>{
+      node.id ||= uid('node'); node.type = NODE_TYPES[node.type] ? node.type : 'task'; node.laneId ||= doc.lanes[0]?.id || null;
+      node.position ||= {x:120,y:100}; node.position.x = +node.position.x||0; node.position.y = +node.position.y||0; node.data ||= {};
+      const d=node.data; d.label ||= NODE_TYPES[node.type].label; d.description ||= ''; d.owner ||= ''; d.enabled=d.enabled!==false; d.locked=d.locked===true;
+      d.slaMinutes = d.slaMinutes ?? null; d.tags = Array.isArray(d.tags)?d.tags:[]; d.level=['executive','operational','technical'].includes(d.level)?d.level:(node.type==='api'?'technical':'operational');
+      d.category ||= node.type==='api'?'integration':'process'; d.criticality=['low','medium','high','critical'].includes(d.criticality)?d.criticality:'medium';
+      d.linkedFlowId ||= null; d.linkedFlowEntryNodeId ||= null; d.linkedFlowExitNodeId ||= null; d.preferredEdgeId ||= null; d.documentationUrl ||= '';
+      d.raci = d.raci && typeof d.raci==='object' ? d.raci : {responsible:'',accountable:'',consulted:[],informed:[]};
+      d.raci.consulted = Array.isArray(d.raci.consulted)?d.raci.consulted:[]; d.raci.informed=Array.isArray(d.raci.informed)?d.raci.informed:[];
     });
-    selectedNodeId=id;selectedEdgeId=null;markDirty();render();
+    doc.edges = Array.isArray(doc.edges)?doc.edges:[];
+    doc.edges.forEach(edge=>{edge.id ||= uid('edge');edge.source ||= '';edge.target ||= '';edge.sourceHandle ||= 'output';edge.targetHandle ||= 'input';edge.type ||= 'step';edge.label ||= '';edge.condition ||= '';edge.enabled=edge.enabled!==false;});
+    const byId = new Map(doc.nodes.map(n=>[n.id,n]));
+    const outgoing = new Map();
+    doc.edges.forEach(e=>{if(!outgoing.has(e.source))outgoing.set(e.source,[]);outgoing.get(e.source).push(e)});
+    outgoing.forEach((edges,id)=>edges.forEach((e,i)=>{if(byId.get(id)?.type==='decision')e.sourceHandle=/^branch-\d+$/.test(e.sourceHandle||'')?e.sourceHandle:`branch-${i}`;else e.sourceHandle='output';}));
+    return doc;
+  }
+
+  const state = {
+    doc: normalizeDocument(boot.document), revision:+boot.revision||1, version:+boot.version||1, status:boot.status||'draft',
+    selectedNodes:new Set(), selectedEdge:null, selectedLane:null, connectSource:null,
+    history:[], future:[], dirty:false, scale:clamp(+boot.document?.viewport?.zoom||1,MIN_ZOOM,MAX_ZOOM),
+    drag:null, pan:null, marquee:null, spaceDown:false,
+    searchResults:[], searchIndex:-1, viewMode:localStorage.getItem('fluxos-view-mode')||'all', edgeVisibility:localStorage.getItem('fluxos-edge-visibility')||'all',
+    focusNodes:null, focusEdges:null, route:null, pendingNav:null, allowNav:false,
+    comments:clone(boot.comments)||[], versions:clone(boot.versions)||[], approvals:clone(boot.approvals)||[], presence:clone(boot.presence)||[],
+    templates:[...(clone(boot.templates?.builtIn)||[]),...(clone(boot.templates?.custom)||[])],
+    draft:clone(boot.draft), draftBase:+boot.draftBaseRevision||0,
+    playback:{running:false,paused:false,timer:null,currentNode:null,currentEdge:null,visitedNodes:new Set(),visitedEdges:new Set(),waiting:false},
+  };
+  if(!['all','executive','operational','technical','exceptions','selected-lane'].includes(state.viewMode)) state.viewMode='all';
+  if(!['all','selection','cross-lane','none'].includes(state.edgeVisibility)) state.edgeVisibility='all';
+
+  function nodeById(id){return state.doc.nodes.find(n=>n.id===id)}
+  function edgeById(id){return state.doc.edges.find(e=>e.id===id)}
+  function laneById(id){return state.doc.lanes.find(l=>l.id===id)}
+  function orderedLanes(){return [...state.doc.lanes].filter(l=>l.enabled!==false).sort((a,b)=>(+a.order||0)-(+b.order||0))}
+  function laneGeometry(){let top=20;const map=new Map();orderedLanes().forEach(l=>{const h=l.collapsed?56:clamp(+l.height||260,110,1800);map.set(l.id,{top,height:h,bottom:top+h});top+=h+12});return {map,total:top}}
+  function markDirty(){state.dirty=true;$('editorStatus').textContent='Alterações não sincronizadas';$('editorStatus').className='dirty';}
+  function markSaved(text='Salvo no MongoDB'){state.dirty=false;$('editorStatus').textContent=text;$('editorStatus').className='saved';setTimeout(()=>{if(!state.dirty){$('editorStatus').textContent='Sem alterações pendentes';$('editorStatus').className='';}},2200)}
+  function snapshot(){return JSON.stringify(state.doc)}
+  function pushHistory(){const snap=snapshot();if(state.history[state.history.length-1]!==snap)state.history.push(snap);if(state.history.length>80)state.history.shift();state.future=[];}
+  function applySnapshot(text){state.doc=normalizeDocument(JSON.parse(text));state.selectedNodes.clear();state.selectedEdge=null;state.selectedLane=null;markDirty();render();}
+  function undo(){if(!state.history.length)return;state.future.push(snapshot());applySnapshot(state.history.pop())}
+  function redo(){if(!state.future.length)return;state.history.push(snapshot());applySnapshot(state.future.pop())}
+  function mutate(fn,{layout=false}={}){pushHistory();fn();if(layout&&state.doc.settings.autoFitLanes)fitLanes();state.doc.flow.updatedAt=nowIso();markDirty();render();}
+
+  function notify(message,type='info',timeout=3600){const box=document.createElement('div');box.className=`pro-toast ${type}`;box.innerHTML=`<strong>${type==='error'?'Erro':type==='success'?'Concluído':'Fluxos Luiz'}</strong><span>${esc(message)}</span>`;$('toastContainer').appendChild(box);setTimeout(()=>box.remove(),timeout)}
+  function modal(title,html,after=null){$('modalTitle').textContent=title;$('modalBody').innerHTML=html;$('genericModal').hidden=false;after?.($('modalBody'))}
+  function closeModal(){$('genericModal').hidden=true;$('modalBody').innerHTML=''}
+  qa('[data-action="close-modal"]').forEach(b=>b.addEventListener('click',closeModal));
+  $('genericModal').addEventListener('mousedown',e=>{if(e.target===$('genericModal'))closeModal()});
+
+  async function requestJson(url,{method='GET',body=null}={}){
+    const headers={'Accept':'application/json','X-CSRF-TOKEN':csrf};if(body!==null)headers['Content-Type']='application/json';
+    const res=await fetch(url,{method,headers,body:body===null?null:JSON.stringify(body)});let data={};try{data=await res.json()}catch(_){data={message:await res.text()}}
+    if(!res.ok){const msg=data.message||Object.values(data.errors||{}).flat().join(' · ')||`HTTP ${res.status}`;const err=new Error(msg);err.status=res.status;err.data=data;throw err}return data;
+  }
+  async function postBlob(url,body){const res=await fetch(url,{method:'POST',headers:{'Accept':'*/*','Content-Type':'application/json','X-CSRF-TOKEN':csrf},body:JSON.stringify(body)});if(!res.ok){let msg=`HTTP ${res.status}`;try{const d=await res.json();msg=d.message||msg}catch(_){}throw new Error(msg)}return {blob:await res.blob(),disposition:res.headers.get('Content-Disposition')||''}}
+  function downloadBlob(blob,name){const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1500)}
+  function downloadText(text,name,type='text/plain;charset=utf-8'){downloadBlob(new Blob([text],{type}),name)}
+  function filenameFromDisposition(header,fallback){const m=/filename="?([^";]+)"?/i.exec(header||'');return m?.[1]||fallback}
+  function slug(s){return String(s||'fluxo').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9_-]+/g,'_').replace(/^_+|_+$/g,'')||'fluxo'}
+
+  function isException(node){const d=node.data||{};const text=`${d.label||''} ${d.description||''} ${(d.tags||[]).join(' ')}`.toLowerCase();return EXCEPTION_WORDS.some(w=>text.includes(w))}
+  function visibleNodes(){const lane=state.selectedLane;return state.doc.nodes.filter(n=>{
+    if(n.data?.enabled===false)return false;
+    if(state.viewMode==='all')return true;
+    if(state.viewMode==='exceptions')return isException(n);
+    if(state.viewMode==='selected-lane')return lane && n.laneId===lane;
+    return n.data?.level===state.viewMode;
+  })}
+  function visibleNodeIds(){return new Set(visibleNodes().map(n=>n.id))}
+  function edgeVisible(edge,ids){if(state.edgeVisibility==='none'||edge.enabled===false)return false;if(!ids.has(edge.source)||!ids.has(edge.target))return false;if(state.edgeVisibility==='selection'){const selected=state.selectedNodes;return selected.has(edge.source)||selected.has(edge.target)}if(state.edgeVisibility==='cross-lane')return nodeById(edge.source)?.laneId!==nodeById(edge.target)?.laneId;return true}
+  function semantic(edge){const source=nodeById(edge.source),target=nodeById(edge.target);if(source?.type!=='decision')return'neutral';const text=`${edge.label||''} ${edge.condition||''} ${target?.data?.label||''} ${(target?.data?.tags||[]).join(' ')}`.toLowerCase();if(['não','nao','negativo','recus','rejeit','falha','erro','cancel','inválid','invalid','reprov','bloque'].some(x=>text.includes(x)))return'negative';if(['sim','positivo','aprov','aceit','válid','valid','conclu','sucesso','ativo','permit',' ok'].some(x=>text.includes(x)))return'positive';return'neutral'}
+  function edgeColor(edge){return semantic(edge)==='positive'?'#16a34a':semantic(edge)==='negative'?'#dc2626':'#64748b'}
+
+  function portPoint(node,which){const x=+node.position.x||0,y=+node.position.y||0;return which==='out'?{x:x+NODE_W+6,y:y+NODE_H/2}:{x:x-6,y:y+NODE_H/2}}
+  function edgePath(edge){const s=nodeById(edge.source),t=nodeById(edge.target);if(!s||!t)return'';const a=portPoint(s,'out'),b=portPoint(t,'in'),routing=state.doc.settings.edgeRouting||'smooth';
+    if(routing==='straight')return`M ${a.x} ${a.y} L ${b.x} ${b.y}`;
+    if(routing==='orthogonal'){const m=(a.x+b.x)/2;return`M ${a.x} ${a.y} L ${m} ${a.y} L ${m} ${b.y} L ${b.x} ${b.y}`}
+    if(routing==='corridor'){const m=Math.max(a.x+60,(a.x+b.x)/2);return`M ${a.x} ${a.y} L ${m} ${a.y} L ${m} ${b.y} L ${b.x} ${b.y}`}
+    if(routing==='corridor-v2'){const same=s.laneId===t.laneId;const dir=b.x>=a.x?1:-1;if(same){const m=(a.x+b.x)/2;return`M ${a.x} ${a.y} L ${m} ${a.y} L ${m} ${b.y} L ${b.x} ${b.y}`}const laneG=laneGeometry().map;const sg=laneG.get(s.laneId),tg=laneG.get(t.laneId);const channel=((sg?.bottom||a.y)+(tg?.top||b.y))/2;const x1=a.x+dir*42,x2=b.x-dir*42;return`M ${a.x} ${a.y} L ${x1} ${a.y} L ${x1} ${channel} L ${x2} ${channel} L ${x2} ${b.y} L ${b.x} ${b.y}`}
+    const dx=Math.max(55,Math.abs(b.x-a.x)*.4),dir=b.x>=a.x?1:-1;return`M ${a.x} ${a.y} C ${a.x+dir*dx} ${a.y}, ${b.x-dir*dx} ${b.y}, ${b.x} ${b.y}`;
+  }
+
+  function render(){
+    world.style.width=`${WORLD_WIDTH}px`;world.style.height=`${Math.max(WORLD_HEIGHT,laneGeometry().total+200)}px`;world.style.transform=`scale(${state.scale})`;world.style.transformOrigin='0 0';
+    $('zoomLabel').textContent=`${Math.round(state.scale*100)}%`;stage.classList.toggle('grid-on',state.doc.settings.showGrid!==false);$('emptyState').hidden=state.doc.nodes.length>0;
+    renderLanes();renderEdges();renderNodes();renderMinimap();renderInspector();renderStatusbar();renderPresence();renderComments();renderVersions();renderApprovals();renderTemplates();
+    $('viewMode').value=state.viewMode;$('edgeVisibility').value=state.edgeVisibility;$('edgeRouting').value=state.doc.settings.edgeRouting;$('interactivePlay').checked=state.doc.settings.interactivePlayback!==false;$('showGrid').checked=state.doc.settings.showGrid!==false;$('snapGrid').checked=state.doc.settings.snapToGrid!==false;$('showMinimap').checked=state.doc.settings.showMiniMap!==false;$('autoFitLanes').checked=state.doc.settings.autoFitLanes!==false;minimap.hidden=state.doc.settings.showMiniMap===false;
+  }
+
+  function renderLanes(){const geo=laneGeometry().map;lanesLayer.innerHTML='';orderedLanes().forEach(lane=>{const g=geo.get(lane.id);const el=document.createElement('div');el.className=`pro-lane ${state.selectedLane===lane.id?'selected':''} ${lane.collapsed?'collapsed':''}`;el.dataset.laneId=lane.id;el.style.top=`${g.top}px`;el.style.height=`${g.height}px`;el.style.background=`color-mix(in srgb, ${lane.color||'#E8F5F0'} 15%, var(--surface))`;el.innerHTML=`<div class="pro-lane-title"><strong>${esc(lane.name)}</strong><span>${esc(lane.owner||'')}</span></div>`;el.addEventListener('click',e=>{if(e.target.closest('.pro-node'))return;e.stopPropagation();state.selectedLane=lane.id;state.selectedNodes.clear();state.selectedEdge=null;render()});lanesLayer.appendChild(el)})}
+
+  function renderEdges(){edgeLayer.setAttribute('viewBox',`0 0 ${WORLD_WIDTH} ${Math.max(WORLD_HEIGHT,laneGeometry().total+200)}`);edgeLayer.innerHTML=`<defs><marker id="fv-arrow-neutral" markerWidth="12" markerHeight="12" refX="10" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L0,10 L11,5 z" fill="#64748b"/></marker><marker id="fv-arrow-positive" markerWidth="12" markerHeight="12" refX="10" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L0,10 L11,5 z" fill="#16a34a"/></marker><marker id="fv-arrow-negative" markerWidth="12" markerHeight="12" refX="10" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L0,10 L11,5 z" fill="#dc2626"/></marker></defs>`;
+    const ids=visibleNodeIds();state.doc.edges.forEach(edge=>{if(!edgeVisible(edge,ids))return;const d=edgePath(edge);if(!d)return;const focused=!state.focusEdges||state.focusEdges.has(edge.id);const selected=state.selectedEdge===edge.id;const sem=semantic(edge),color=edgeColor(edge);
+      const group=document.createElementNS('http://www.w3.org/2000/svg','g');group.dataset.edgeId=edge.id;group.style.opacity=focused?'1':'.14';
+      const path=document.createElementNS('http://www.w3.org/2000/svg','path');path.setAttribute('d',d);path.setAttribute('marker-end',`url(#fv-arrow-${sem})`);path.setAttribute('class','pro-edge-path');path.style.stroke=color;path.style.strokeWidth=selected?'4':'2';
+      if(edge.enabled===false)path.style.strokeDasharray='7 6';group.appendChild(path);
+      const hit=document.createElementNS('http://www.w3.org/2000/svg','path');hit.setAttribute('d',d);hit.setAttribute('class','pro-edge-hit');hit.addEventListener('click',ev=>{ev.stopPropagation();state.selectedEdge=edge.id;state.selectedNodes.clear();state.selectedLane=null;render()});group.appendChild(hit);
+      const label=edge.label||edge.condition||'';if(label){const s=nodeById(edge.source),t=nodeById(edge.target);const a=portPoint(s,'out'),b=portPoint(t,'in');const x=(a.x+b.x)/2,y=(a.y+b.y)/2-8;const text=document.createElementNS('http://www.w3.org/2000/svg','text');text.setAttribute('x',x);text.setAttribute('y',y);text.setAttribute('text-anchor','middle');text.setAttribute('class','pro-edge-label');text.style.fill=color;text.textContent=label;group.appendChild(text)}edgeLayer.appendChild(group)})}
+
+  function renderNodes(){nodesLayer.innerHTML='';const visible=visibleNodeIds();state.doc.nodes.forEach(node=>{if(!visible.has(node.id))return;const meta=NODE_TYPES[node.type]||NODE_TYPES.task;const el=document.createElement('div');const focused=!state.focusNodes||state.focusNodes.has(node.id);el.className=`pro-node ${state.selectedNodes.has(node.id)?'selected':''} ${node.data?.locked?'locked':''} ${state.playback.currentNode===node.id?'playing':''}`;el.dataset.nodeId=node.id;el.style.left=`${node.position.x}px`;el.style.top=`${node.position.y}px`;el.style.setProperty('--node-color',meta.color);el.style.opacity=focused?'1':'.15';
+      const inCount=state.doc.edges.filter(e=>e.target===node.id&&e.enabled!==false).length,outCount=state.doc.edges.filter(e=>e.source===node.id&&e.enabled!==false).length;const crit=['high','critical'].includes(node.data?.criticality)?`<span class="pro-critical ${node.data.criticality}">${node.data.criticality==='critical'?'CRÍTICA':'ALTA'}</span>`:'';const linked=node.data?.linkedFlowId?'<span class="pro-linked" title="Duplo clique para abrir subprocesso">↗</span>':'';
+      el.innerHTML=`${crit}<div class="pro-node-top"><span class="pro-node-icon">${meta.icon}</span><span>${esc(meta.label)}</span>${linked}</div><div class="pro-node-title">${esc(node.data?.label||node.id)}</div><div class="pro-node-description">${esc(node.data?.description||'')}</div><div class="pro-node-foot"><span>${esc(node.data?.owner||'Sem responsável')}</span><span>${node.data?.slaMinutes?esc(node.data.slaMinutes)+' min':''}</span></div><button class="pro-port input" type="button" title="Entrada · ${inCount}"><span>${inCount}</span></button><button class="pro-port output" type="button" title="Saída · ${outCount}"><span>${outCount}</span></button>`;
+      el.addEventListener('mousedown',startNodeDrag);el.addEventListener('click',e=>selectNode(node.id,e));el.addEventListener('dblclick',()=>openLinkedFlow(node));
+      q('.pro-port.output',el).addEventListener('click',e=>{e.stopPropagation();state.connectSource=node.id;notify(`Origem: ${node.data?.label||node.id}. Clique na entrada do card de destino.`);renderStatusbar()});
+      q('.pro-port.input',el).addEventListener('click',e=>{e.stopPropagation();if(!state.connectSource){notify('Primeiro clique na saída do card de origem.','error');return}connectNodes(state.connectSource,node.id)});
+      nodesLayer.appendChild(el)})}
+
+  function renderStatusbar(){const n=state.selectedNodes.size;if(state.selectedEdge)$('selectionLabel').textContent=`Conexão ${state.selectedEdge}`;else if(n)$('selectionLabel').textContent=n===1?`1 card selecionado`:`${n} cards selecionados`;else if(state.selectedLane)$('selectionLabel').textContent=`Raia: ${laneById(state.selectedLane)?.name||state.selectedLane}`;else $('selectionLabel').textContent='Nenhum item selecionado';$('focusStatus').textContent=state.connectSource?`Conectando a partir de ${nodeById(state.connectSource)?.data?.label||state.connectSource}`:state.focusNodes?'Caminho destacado':'';}
+
+  function renderMinimap(){if(!minimap||state.doc.settings.showMiniMap===false)return;const ctx=minimap.getContext('2d');const dpr=devicePixelRatio||1,w=190,h=120;minimap.width=w*dpr;minimap.height=h*dpr;minimap.style.width=`${w}px`;minimap.style.height=`${h}px`;ctx.scale(dpr,dpr);ctx.clearRect(0,0,w,h);ctx.fillStyle=getComputedStyle(document.documentElement).getPropertyValue('--surface-2').trim()||'#eef2f7';ctx.fillRect(0,0,w,h);const xs=state.doc.nodes.map(n=>+n.position.x||0),ys=state.doc.nodes.map(n=>+n.position.y||0);const maxX=Math.max(900,...xs.map(x=>x+NODE_W)),maxY=Math.max(500,...ys.map(y=>y+NODE_H));const sx=(w-8)/maxX,sy=(h-8)/maxY;state.doc.nodes.forEach(n=>{ctx.fillStyle=NODE_TYPES[n.type]?.color||'#64748b';ctx.fillRect(4+n.position.x*sx,4+n.position.y*sy,Math.max(3,NODE_W*sx),Math.max(2,NODE_H*sy))});const vx=stage.scrollLeft/state.scale*sx,vy=stage.scrollTop/state.scale*sy,vw=stage.clientWidth/state.scale*sx,vh=stage.clientHeight/state.scale*sy;ctx.strokeStyle='#ef4444';ctx.lineWidth=1;ctx.strokeRect(4+vx,4+vy,vw,vh)}
+
+  minimap?.addEventListener('click',e=>{const rect=minimap.getBoundingClientRect(),x=(e.clientX-rect.left)/rect.width,y=(e.clientY-rect.top)/rect.height;const xs=state.doc.nodes.map(n=>+n.position.x||0),ys=state.doc.nodes.map(n=>+n.position.y||0);const maxX=Math.max(900,...xs.map(v=>v+NODE_W)),maxY=Math.max(500,...ys.map(v=>v+NODE_H));stage.scrollTo({left:Math.max(0,x*maxX*state.scale-stage.clientWidth/2),top:Math.max(0,y*maxY*state.scale-stage.clientHeight/2),behavior:'smooth'})});
+
+  function selectNode(id,e={}){if(e.ctrlKey||e.metaKey||e.shiftKey){if(state.selectedNodes.has(id))state.selectedNodes.delete(id);else state.selectedNodes.add(id)}else{if(!state.selectedNodes.has(id)||state.selectedNodes.size>1){state.selectedNodes.clear();state.selectedNodes.add(id)}}state.selectedEdge=null;state.selectedLane=nodeById(id)?.laneId||null;render()}
+  function selectOnly(ids){state.selectedNodes=new Set(ids);state.selectedEdge=null;render()}
+
+  function connectNodes(sourceId,targetId){if(!sourceId||!targetId||sourceId===targetId){notify('Origem e destino precisam ser cards diferentes.','error');return}const duplicate=state.doc.edges.some(e=>e.source===sourceId&&e.target===targetId);if(duplicate){notify('Essa conexão já existe.','error');return}mutate(()=>{const source=nodeById(sourceId);const index=state.doc.edges.filter(e=>e.source===sourceId).length;state.doc.edges.push({id:uid('edge'),source:sourceId,target:targetId,sourceHandle:source?.type==='decision'?`branch-${index}`:'output',targetHandle:'input',type:'step',label:source?.type==='decision'?(index===0?'Sim':index===1?'Não':''):source?.type==='decision'?'Condição':'',condition:'',enabled:true});state.connectSource=null});}
+
+  function startNodeDrag(e){if(e.button!==0||e.target.closest('.pro-port'))return;const node=nodeById(e.currentTarget.dataset.nodeId);if(!node||node.data?.locked)return;if(!(e.ctrlKey||e.metaKey||e.shiftKey)&&!state.selectedNodes.has(node.id)){state.selectedNodes.clear();state.selectedNodes.add(node.id)}else if((e.ctrlKey||e.metaKey||e.shiftKey)&&!state.selectedNodes.has(node.id))state.selectedNodes.add(node.id);state.selectedEdge=null;pushHistory();const positions={};state.selectedNodes.forEach(id=>{const n=nodeById(id);if(n&&!n.data?.locked)positions[id]={x:+n.position.x||0,y:+n.position.y||0}});state.drag={startX:e.clientX,startY:e.clientY,positions,moved:false};e.preventDefault();render()}
+  window.addEventListener('mousemove',e=>{if(state.drag){const dx=(e.clientX-state.drag.startX)/state.scale,dy=(e.clientY-state.drag.startY)/state.scale;const grid=state.doc.settings.snapToGrid?(+state.doc.settings.gridSize||20):1;Object.entries(state.drag.positions).forEach(([id,p])=>{const n=nodeById(id);if(!n)return;let x=p.x+dx,y=p.y+dy;if(grid>1){x=Math.round(x/grid)*grid;y=Math.round(y/grid)*grid}n.position={x:Math.max(0,x),y:Math.max(0,y)}});state.drag.moved=true;markDirty();render();return}if(state.pan){stage.scrollLeft=state.pan.scrollX-(e.clientX-state.pan.x);stage.scrollTop=state.pan.scrollY-(e.clientY-state.pan.y);renderMinimap();return}if(state.marquee){updateMarquee(e)}});
+  window.addEventListener('mouseup',e=>{if(state.drag){if(state.drag.moved){assignLanesByPosition();if(state.doc.settings.autoFitLanes)fitLanes();markDirty()}else state.history.pop();state.drag=null;render()}if(state.pan){state.pan=null;stage.classList.remove('panning')}if(state.marquee)finishMarquee(e)});
+
+  function startMarquee(e){const r=stage.getBoundingClientRect();state.marquee={x0:e.clientX-r.left+stage.scrollLeft,y0:e.clientY-r.top+stage.scrollTop,x1:0,y1:0};selectionBox.hidden=false;updateMarquee(e)}
+  function updateMarquee(e){const r=stage.getBoundingClientRect(),x=e.clientX-r.left+stage.scrollLeft,y=e.clientY-r.top+stage.scrollTop,m=state.marquee;m.x1=x;m.y1=y;selectionBox.style.left=`${Math.min(m.x0,x)-stage.scrollLeft}px`;selectionBox.style.top=`${Math.min(m.y0,y)-stage.scrollTop}px`;selectionBox.style.width=`${Math.abs(x-m.x0)}px`;selectionBox.style.height=`${Math.abs(y-m.y0)}px`}
+  function finishMarquee(){const m=state.marquee;state.marquee=null;selectionBox.hidden=true;const x1=Math.min(m.x0,m.x1)/state.scale,y1=Math.min(m.y0,m.y1)/state.scale,x2=Math.max(m.x0,m.x1)/state.scale,y2=Math.max(m.y0,m.y1)/state.scale;const ids=visibleNodes().filter(n=>n.position.x+NODE_W>=x1&&n.position.x<=x2&&n.position.y+NODE_H>=y1&&n.position.y<=y2).map(n=>n.id);selectOnly(ids)}
+
+  stage.addEventListener('mousedown',e=>{if(e.target.closest('.pro-node')||e.target.closest('.pro-lane-title'))return;if(e.shiftKey&&e.button===0){startMarquee(e);e.preventDefault();return}if(e.button===1||e.button===2||state.spaceDown){state.pan={x:e.clientX,y:e.clientY,scrollX:stage.scrollLeft,scrollY:stage.scrollTop};stage.classList.add('panning');e.preventDefault();return}if(e.button===0){state.selectedNodes.clear();state.selectedEdge=null;state.selectedLane=null;state.connectSource=null;render()}});
+  stage.addEventListener('contextmenu',e=>e.preventDefault());
+  stage.addEventListener('wheel',e=>{if(e.ctrlKey||e.metaKey){e.preventDefault();zoomAt(e.deltaY>0?-.1:.1,e.clientX,e.clientY)}},{passive:false});
+
+  function assignLanesByPosition(){const geo=laneGeometry().map;state.doc.nodes.forEach(n=>{const cy=n.position.y+NODE_H/2;for(const [id,g] of geo){if(cy>=g.top&&cy<=g.bottom){n.laneId=id;break}}})}
+  function fitLanes(){const lanes=orderedLanes();let top=20;lanes.forEach(lane=>{const nodes=state.doc.nodes.filter(n=>n.laneId===lane.id&&n.data?.enabled!==false);const rows=[];nodes.sort((a,b)=>a.position.x-b.position.x).forEach(n=>{let row=rows.findIndex(lastX=>n.position.x>lastX+40);if(row<0){row=rows.length;rows.push(n.position.x+NODE_W)}else rows[row]=n.position.x+NODE_W;n.position.y=top+LANE_CONTENT_TOP+row*ROW_GAP});lane.height=lane.collapsed?56:Math.max(170,LANE_CONTENT_TOP+Math.max(1,rows.length)*ROW_GAP+28);top+=lane.height+12})}
+
+  function autoLayout(){mutate(()=>{const nodes=state.doc.nodes.filter(n=>n.data?.enabled!==false),incoming=new Map(nodes.map(n=>[n.id,0])),out=new Map(nodes.map(n=>[n.id,[]]));state.doc.edges.filter(e=>e.enabled!==false&&incoming.has(e.source)&&incoming.has(e.target)).forEach(e=>{incoming.set(e.target,incoming.get(e.target)+1);out.get(e.source).push(e.target)});let roots=nodes.filter(n=>n.type==='start'||incoming.get(n.id)===0);if(!roots.length&&nodes[0])roots=[nodes[0]];const level=new Map(),queue=roots.map(n=>[n.id,0]);while(queue.length){const [id,l]=queue.shift();if(level.has(id)&&level.get(id)>=l)continue;level.set(id,l);(out.get(id)||[]).forEach(t=>queue.push([t,l+1]))}nodes.forEach(n=>{if(!level.has(n.id))level.set(n.id,0)});const geo=laneGeometry().map;const laneRows=new Map();nodes.forEach(n=>{const l=level.get(n.id)||0;const lane=n.laneId||state.doc.lanes[0]?.id;const key=`${lane}:${l}`;const row=laneRows.get(key)||0;laneRows.set(key,row+1);const g=geo.get(lane)||{top:20};n.position.x=100+l*280;n.position.y=g.top+LANE_CONTENT_TOP+row*ROW_GAP});if(state.doc.settings.autoFitLanes)fitLanes()},{layout:false});fitView()}
+
+  function zoomAt(delta,clientX=stage.getBoundingClientRect().left+stage.clientWidth/2,clientY=stage.getBoundingClientRect().top+stage.clientHeight/2){const old=state.scale,next=clamp(old+delta,MIN_ZOOM,MAX_ZOOM);if(next===old)return;const r=stage.getBoundingClientRect(),wx=(stage.scrollLeft+(clientX-r.left))/old,wy=(stage.scrollTop+(clientY-r.top))/old;state.scale=next;stage.scrollLeft=wx*next-(clientX-r.left);stage.scrollTop=wy*next-(clientY-r.top);state.doc.viewport.zoom=next;render()}
+  function fitView(){const nodes=visibleNodes();if(!nodes.length){state.scale=1;stage.scrollTo(0,0);render();return}const minX=Math.min(...nodes.map(n=>n.position.x))-80,minY=Math.min(...nodes.map(n=>n.position.y))-80,maxX=Math.max(...nodes.map(n=>n.position.x+NODE_W))+80,maxY=Math.max(...nodes.map(n=>n.position.y+NODE_H))+80;const scale=clamp(Math.min(stage.clientWidth/(maxX-minX),stage.clientHeight/(maxY-minY)),MIN_ZOOM,1.4);state.scale=scale;stage.scrollLeft=Math.max(0,minX*scale);stage.scrollTop=Math.max(0,minY*scale);render()}
+  function focusNode(id){const n=nodeById(id);if(!n)return;state.selectedNodes=new Set([id]);state.selectedEdge=null;state.scale=Math.max(state.scale,.7);stage.scrollTo({left:Math.max(0,(n.position.x-200)*state.scale),top:Math.max(0,(n.position.y-180)*state.scale),behavior:'smooth'});render()}
+
+  function addNode(type,x=null,y=null,laneId=null){const meta=NODE_TYPES[type]||NODE_TYPES.task;const geo=laneGeometry().map;const lane=laneById(laneId)||orderedLanes()[0];const g=geo.get(lane?.id)||{top:20};const id=uid('node');mutate(()=>{state.doc.nodes.push({id,type:meta===NODE_TYPES.task?'task':type,laneId:lane?.id||null,position:{x:x??(stage.scrollLeft/state.scale+180),y:y??(g.top+LANE_CONTENT_TOP)},data:{label:meta.label,description:'',owner:lane?.owner||'',enabled:true,locked:false,slaMinutes:null,tags:[],level:type==='api'?'technical':'operational',category:type==='api'?'integration':'process',criticality:'medium',linkedFlowId:null,linkedFlowEntryNodeId:null,linkedFlowExitNodeId:null,preferredEdgeId:null,documentationUrl:'',raci:{responsible:'',accountable:'',consulted:[],informed:[]}}});state.selectedNodes=new Set([id]);state.selectedLane=lane?.id||null},{layout:true});return id}
+  function addLane(){mutate(()=>{const order=Math.max(0,...state.doc.lanes.map(l=>+l.order||0))+1;const lane={id:uid('lane'),name:`Raia ${order}`,owner:'',order,color:['#E8F5F0','#EAF4FF','#FFF5E6','#F3E8FF','#FDECEC'][order%5],collapsed:false,enabled:true,height:260};state.doc.lanes.push(lane);state.selectedLane=lane.id;state.selectedNodes.clear()})}
+  function deleteSelection(){if(state.selectedEdge){mutate(()=>{state.doc.edges=state.doc.edges.filter(e=>e.id!==state.selectedEdge);state.selectedEdge=null});return}if(state.selectedNodes.size){const ids=new Set(state.selectedNodes);mutate(()=>{state.doc.nodes=state.doc.nodes.filter(n=>!ids.has(n.id));state.doc.edges=state.doc.edges.filter(e=>!ids.has(e.source)&&!ids.has(e.target));state.selectedNodes.clear()},{layout:true});return}if(state.selectedLane){const lane=laneById(state.selectedLane);if(!lane)return;const count=state.doc.nodes.filter(n=>n.laneId===lane.id).length;if(count&&!confirm(`A raia possui ${count} card(s). Excluir a raia e os cards?`))return;mutate(()=>{const ids=new Set(state.doc.nodes.filter(n=>n.laneId===lane.id).map(n=>n.id));state.doc.nodes=state.doc.nodes.filter(n=>!ids.has(n.id));state.doc.edges=state.doc.edges.filter(e=>!ids.has(e.source)&&!ids.has(e.target));state.doc.lanes=state.doc.lanes.filter(l=>l.id!==lane.id);state.selectedLane=null},{layout:true})}}
+  function duplicateSelection(){if(!state.selectedNodes.size)return;mutate(()=>{const map=new Map(),newNodes=[];state.selectedNodes.forEach(id=>{const n=nodeById(id);if(!n)return;const c=clone(n);c.id=uid('node');c.position.x+=36;c.position.y+=36;c.data.label=`Cópia de ${c.data.label}`;map.set(id,c.id);newNodes.push(c)});const newEdges=state.doc.edges.filter(e=>map.has(e.source)&&map.has(e.target)).map(e=>({...clone(e),id:uid('edge'),source:map.get(e.source),target:map.get(e.target)}));state.doc.nodes.push(...newNodes);state.doc.edges.push(...newEdges);state.selectedNodes=new Set(newNodes.map(n=>n.id))},{layout:true})}
+  function alignSelection(mode){const nodes=[...state.selectedNodes].map(nodeById).filter(Boolean);if(nodes.length<2)return;mutate(()=>{if(mode==='left'){const v=Math.min(...nodes.map(n=>n.position.x));nodes.forEach(n=>n.position.x=v)}if(mode==='right'){const v=Math.max(...nodes.map(n=>n.position.x+NODE_W));nodes.forEach(n=>n.position.x=v-NODE_W)}if(mode==='top'){const v=Math.min(...nodes.map(n=>n.position.y));nodes.forEach(n=>n.position.y=v)}if(mode==='middle'){const v=nodes.reduce((s,n)=>s+n.position.y+NODE_H/2,0)/nodes.length;nodes.forEach(n=>n.position.y=v-NODE_H/2)}})}
+  function distributeSelection(axis){const nodes=[...state.selectedNodes].map(nodeById).filter(Boolean);if(nodes.length<3)return;mutate(()=>{nodes.sort((a,b)=>axis==='x'?a.position.x-b.position.x:a.position.y-b.position.y);const first=axis==='x'?nodes[0].position.x:nodes[0].position.y,last=axis==='x'?nodes.at(-1).position.x:nodes.at(-1).position.y,step=(last-first)/(nodes.length-1);nodes.forEach((n,i)=>{if(axis==='x')n.position.x=first+step*i;else n.position.y=first+step*i})})}
+
+  function renderInspector(){const selected=[...state.selectedNodes].map(nodeById).filter(Boolean);if(selected.length>1){$('propertiesCaption').textContent=`${selected.length} cards`;props.innerHTML=`<div class="pro-multi-actions"><strong>${selected.length} cards selecionados</strong><p class="small muted">Ações em grupo preservam as conexões existentes.</p><div class="button-grid"><button class="btn btn-sm" data-group="align-left">Alinhar esquerda</button><button class="btn btn-sm" data-group="align-top">Alinhar topo</button><button class="btn btn-sm" data-group="distribute-x">Distribuir horizontal</button><button class="btn btn-sm" data-group="distribute-y">Distribuir vertical</button><button class="btn btn-sm" data-group="duplicate">Duplicar grupo</button><button class="btn btn-sm btn-danger" data-group="delete">Excluir grupo</button></div></div>`;qa('[data-group]',props).forEach(b=>b.addEventListener('click',()=>{const a=b.dataset.group;if(a==='align-left')alignSelection('left');if(a==='align-top')alignSelection('top');if(a==='distribute-x')distributeSelection('x');if(a==='distribute-y')distributeSelection('y');if(a==='duplicate')duplicateSelection();if(a==='delete')deleteSelection()}));return}
+    if(selected.length===1){renderNodeInspector(selected[0]);return}if(state.selectedEdge){renderEdgeInspector(edgeById(state.selectedEdge));return}if(state.selectedLane){renderLaneInspector(laneById(state.selectedLane));return}renderFlowInspector()}
+  function inputField(label,key,value,type='text',extra=''){return`<div class="field"><label>${esc(label)}</label><input data-prop="${key}" type="${type}" value="${esc(value??'')}" ${extra}></div>`}
+  function textArea(label,key,value){return`<div class="field"><label>${esc(label)}</label><textarea data-prop="${key}">${esc(value??'')}</textarea></div>`}
+  function selectField(label,key,value,options){return`<div class="field"><label>${esc(label)}</label><select data-prop="${key}">${options.map(([v,l])=>`<option value="${esc(v)}" ${v===value?'selected':''}>${esc(l)}</option>`).join('')}</select></div>`}
+  function checkField(label,key,value){return`<label class="pro-check"><input data-prop="${key}" type="checkbox" ${value?'checked':''}> ${esc(label)}</label>`}
+  function renderFlowInspector(){const f=state.doc.flow;$('propertiesCaption').textContent='Fluxo';props.innerHTML=`<h3>Fluxo</h3>${inputField('Nome','flow.name',f.name)}${textArea('Descrição','flow.description',f.description)}${inputField('Tags','flow.tags',(f.tags||[]).join(', '))}${selectField('Orientação','flow.orientation',f.orientation,[['LR','Esquerda → direita'],['RL','Direita → esquerda']])}<div class="divider"></div><h3>Canvas</h3>${selectField('Preset de layout','settings.layoutPreset',state.doc.settings.layoutPreset,[['readable','Legível'],['compact','Compacto'],['preserve','Preservar']])}${inputField('Tamanho da grade','settings.gridSize',state.doc.settings.gridSize,'number','min="5" max="100"')}<div class="stack tight">${checkField('Grade','settings.showGrid',state.doc.settings.showGrid!==false)}${checkField('Encaixar na grade','settings.snapToGrid',state.doc.settings.snapToGrid!==false)}${checkField('Minimapa','settings.showMiniMap',state.doc.settings.showMiniMap!==false)}${checkField('Raias automáticas','settings.autoFitLanes',state.doc.settings.autoFitLanes!==false)}</div><div class="divider"></div><button class="btn btn-sm" data-inspector-action="fit-lanes">Ajustar raias agora</button>`;bindInspector()}
+  function renderLaneInspector(lane){if(!lane)return renderFlowInspector();$('propertiesCaption').textContent='Raia';props.innerHTML=`<h3>Raia</h3>${inputField('Nome','lane.name',lane.name)}${inputField('Responsável','lane.owner',lane.owner)}${inputField('Cor','lane.color',lane.color,'color')}${inputField('Altura','lane.height',lane.height,'number','min="110" max="1800"')}${inputField('Ordem','lane.order',lane.order,'number','min="1"')}${checkField('Recolhida','lane.collapsed',lane.collapsed)}${checkField('Ativa','lane.enabled',lane.enabled!==false)}<div class="divider"></div><button class="btn btn-danger btn-sm" data-inspector-action="delete-lane">Excluir raia</button>`;bindInspector()}
+  function renderNodeInspector(node){const d=node.data||{};$('propertiesCaption').textContent=NODE_TYPES[node.type]?.label||node.type;const linkedOpts=[['','Nenhum'],...(boot.flowCatalog||[]).filter(x=>x.id!==boot.flowId).map(x=>[x.id,x.name])];props.innerHTML=`<h3>${esc(NODE_TYPES[node.type]?.label||node.type)}</h3>${selectField('Tipo','node.type',node.type,Object.entries(NODE_TYPES).map(([k,v])=>[k,v.label]))}${inputField('Título','node.data.label',d.label)}${textArea('Descrição','node.data.description',d.description)}${inputField('Responsável','node.data.owner',d.owner)}${selectField('Raia','node.laneId',node.laneId,state.doc.lanes.map(l=>[l.id,l.name]))}${inputField('SLA em minutos','node.data.slaMinutes',d.slaMinutes??'','number','min="0"')}${selectField('Nível','node.data.level',d.level,[['executive','Executivo'],['operational','Operacional'],['technical','Técnico']])}${inputField('Categoria','node.data.category',d.category)}${selectField('Criticidade','node.data.criticality',d.criticality,[['low','Baixa'],['medium','Média'],['high','Alta'],['critical','Crítica']])}${inputField('Tags','node.data.tags',(d.tags||[]).join(', '))}${inputField('URL de documentação','node.data.documentationUrl',d.documentationUrl,'url')}${checkField('Ativo','node.data.enabled',d.enabled!==false)}${checkField('Bloquear posição','node.data.locked',d.locked===true)}<div class="divider"></div><h3>Subprocesso</h3>${selectField('Fluxo vinculado','node.data.linkedFlowId',d.linkedFlowId||'',linkedOpts)}${inputField('Nó de entrada','node.data.linkedFlowEntryNodeId',d.linkedFlowEntryNodeId||'')}${inputField('Nó de saída','node.data.linkedFlowExitNodeId',d.linkedFlowExitNodeId||'')}<div class="divider"></div><h3>RACI</h3>${inputField('Responsável (R)','node.data.raci.responsible',d.raci?.responsible||d.owner||'')}${inputField('Aprovador (A)','node.data.raci.accountable',d.raci?.accountable||'')}${inputField('Consultados (C)','node.data.raci.consulted',(d.raci?.consulted||[]).join(', '))}${inputField('Informados (I)','node.data.raci.informed',(d.raci?.informed||[]).join(', '))}<div class="divider"></div><button class="btn btn-sm" data-inspector-action="duplicate-node">Duplicar</button> <button class="btn btn-danger btn-sm" data-inspector-action="delete-node">Excluir</button>`;bindInspector()}
+  function renderEdgeInspector(edge){if(!edge)return renderFlowInspector();$('propertiesCaption').textContent='Conexão';const source=nodeById(edge.source);props.innerHTML=`<h3>Conexão</h3><p class="small muted">${esc(source?.data?.label||edge.source)} → ${esc(nodeById(edge.target)?.data?.label||edge.target)}</p>${inputField('Rótulo','edge.label',edge.label)}${textArea('Condição','edge.condition',edge.condition)}${checkField('Ativa','edge.enabled',edge.enabled!==false)}${source?.type==='decision'?checkField('Rota preferencial desta decisão','edge.preferred',source.data?.preferredEdgeId===edge.id):''}<div class="divider"></div><button class="btn btn-danger btn-sm" data-inspector-action="delete-edge">Excluir conexão</button>`;bindInspector()}
+
+  function bindInspector(){qa('[data-prop]',props).forEach(el=>el.addEventListener('change',()=>{if(!boot.editable){notify('Seu nível de acesso é somente leitura.','error');render();return}const key=el.dataset.prop;const value=el.type==='checkbox'?el.checked:el.type==='number'?(el.value===''?null:+el.value):el.value;mutate(()=>applyInspectorValue(key,value))}));qa('[data-inspector-action]',props).forEach(b=>b.addEventListener('click',()=>{const a=b.dataset.inspectorAction;if(a==='delete-node'||a==='delete-edge'||a==='delete-lane')deleteSelection();if(a==='duplicate-node')duplicateSelection();if(a==='fit-lanes')mutate(()=>fitLanes());}));}
+  function applyInspectorValue(key,value){const node=[...state.selectedNodes][0]?nodeById([...state.selectedNodes][0]):null,edge=state.selectedEdge?edgeById(state.selectedEdge):null,lane=state.selectedLane?laneById(state.selectedLane):null;const parts=key.split('.');let obj;
+    if(parts[0]==='flow')obj=state.doc.flow;if(parts[0]==='settings')obj=state.doc.settings;if(parts[0]==='node')obj=node;if(parts[0]==='edge')obj=edge;if(parts[0]==='lane')obj=lane;if(!obj)return;parts.shift();if(key==='edge.preferred'){if(nodeById(edge.source)?.data){nodeById(edge.source).data.preferredEdgeId=value?edge.id:null}return}
+    for(let i=0;i<parts.length-1;i++){obj[parts[i]] ||= {};obj=obj[parts[i]]}const last=parts.at(-1);if(['tags','consulted','informed'].includes(last))obj[last]=String(value||'').split(',').map(x=>x.trim()).filter(Boolean);else if(last==='linkedFlowId'||last==='linkedFlowEntryNodeId'||last==='linkedFlowExitNodeId')obj[last]=value||null;else obj[last]=value;
+    if(key==='flow.name')$('flowTitleToolbar').textContent=value||'Processo';if(key==='settings.showGrid'||key==='settings.showMiniMap'||key==='settings.snapToGrid'||key==='settings.autoFitLanes'){}if(key==='node.laneId'&&state.doc.settings.autoFitLanes)fitLanes();if(key==='lane.order'){state.doc.lanes.sort((a,b)=>(+a.order||0)-(+b.order||0));if(state.doc.settings.autoFitLanes)fitLanes()}}
+
+  function renderPresence(){const arr=state.presence||[];$('presenceUsers').textContent=arr.length?arr.map(x=>x.name||x.username).join(', '):'somente você'}
+  async function refreshPresence(){try{const d=await requestJson(boot.urls.presence,{method:'POST',body:{}});state.presence=d.presence||[];renderPresence()}catch(_){}}
+  setInterval(refreshPresence,25000);
+
+  function renderComments(){const list=$('commentsList');if(!list)return;const show=$('showResolvedComments')?.checked;const items=state.comments.filter(c=>show||!c.resolved);list.innerHTML=items.length?items.map(c=>`<div class="pro-comment ${c.resolved?'resolved':''}" data-comment-id="${esc(c.id)}"><div><strong>@${esc(c.author)}</strong>${c.resolved?' <span class="badge">resolvido</span>':''}</div><div>${esc(c.content)}</div><small class="muted">${esc(c.created_at||'')} · ${esc(c.target_kind||'flow')} ${esc(c.target_id||'')}</small>${!c.resolved?'<button class="btn btn-sm" data-resolve-comment>Resolver</button>':''}</div>`).join(''):'<span class="muted">Nenhum comentário.</span>';qa('[data-resolve-comment]',list).forEach(b=>b.addEventListener('click',async()=>{const id=b.closest('[data-comment-id]').dataset.commentId;try{await requestJson(`/api/comentarios/${encodeURIComponent(id)}`,{method:'PATCH',body:{resolved:true}});const c=state.comments.find(x=>x.id===id);if(c)c.resolved=true;renderComments()}catch(e){notify(e.message,'error')}}))}
+  $('showResolvedComments')?.addEventListener('change',renderComments);
+  q('[data-action="add-comment"]')?.addEventListener('click',async()=>{const content=$('newComment').value.trim();if(!content)return;const target=state.selectedEdge?{kind:'edge',id:state.selectedEdge}:state.selectedNodes.size===1?{kind:'node',id:[...state.selectedNodes][0]}:state.selectedLane?{kind:'lane',id:state.selectedLane}:{kind:'flow',id:boot.flowId};try{const d=await requestJson(boot.urls.comment,{method:'POST',body:{content,target_kind:target.kind,target_id:target.id}});const c=d.comment||{};state.comments.unshift({id:c._id||c.id,target_kind:c.target_kind,target_id:c.target_id,content:c.content,author:c.author,resolved:false,created_at:new Date().toLocaleString('pt-BR')});$('newComment').value='';renderComments();notify('Comentário adicionado.','success')}catch(e){notify(e.message,'error')}});
+
+  function renderVersions(){const list=$('versionsList'),left=$('compareLeft'),right=$('compareRight');if(!list)return;const options=state.versions.map(v=>`<option value="${v.version}">v${v.version}</option>`).join('');if(left&&!left.options.length){left.innerHTML=options;right.innerHTML=options;if(right.options.length>1)right.selectedIndex=0;if(left.options.length>1)left.selectedIndex=1}list.innerHTML=state.versions.length?state.versions.map(v=>`<div class="pro-version"><div><strong>v${v.version}</strong> · ${esc(v.reason||'manual')}<br><small class="muted">${esc(v.created_by||'')} · ${esc(v.created_at||'')}</small></div><div class="actions"><button class="btn btn-sm" data-version-view="${v.version}">Ver</button>${boot.editable?`<button class="btn btn-sm" data-version-restore="${v.version}">Restaurar</button>`:''}</div></div>`).join(''):'<span class="muted">Nenhuma versão.</span>';qa('[data-version-view]',list).forEach(b=>b.addEventListener('click',()=>viewVersion(+b.dataset.versionView)));qa('[data-version-restore]',list).forEach(b=>b.addEventListener('click',()=>restoreVersion(+b.dataset.versionRestore)))}
+  async function viewVersion(version){try{const d=await requestJson(boot.urls.version.replace('__VERSION__',version));modal(`Versão ${version}`,`<pre class="pro-json">${esc(JSON.stringify(d.document,null,2))}</pre>`)}catch(e){notify(e.message,'error')}}
+  async function restoreVersion(version){if(!confirm(`Restaurar a versão ${version} como uma nova versão atual?`))return;try{const d=await requestJson(boot.urls.restoreVersion.replace('__VERSION__',version),{method:'POST',body:{}});state.doc=normalizeDocument(d.flow.document);state.revision=+d.flow.revision;state.version=+d.flow.current_version;state.dirty=false;location.reload()}catch(e){notify(e.message,'error')}}
+  q('[data-action="compare-versions"]')?.addEventListener('click',async()=>{
+    const left=+$('compareLeft').value,right=+$('compareRight').value;
+    if(!left||!right)return;
+    try{
+      const d=await requestJson(boot.urls.compareVersions,{method:'POST',body:{left,right}});
+      const diff=d.diff||{},x=diff.summary||diff;
+      const groups={
+        nodes:{added:x.nodes_added||[],removed:x.nodes_removed||[],changed:x.nodes_changed||[]},
+        edges:{added:x.edges_added||[],removed:x.edges_removed||[],changed:x.edges_changed||[]},
+        lanes:{added:x.lanes_added||[],removed:x.lanes_removed||[],changed:x.lanes_changed||[]},
+      };
+      const detail=(label,g)=>`<div class="card"><strong>${label}</strong><p>+ ${g.added.length} · − ${g.removed.length} · Δ ${g.changed.length}</p><small class="muted">Adicionados: ${esc(g.added.join(', ')||'nenhum')}<br>Removidos: ${esc(g.removed.join(', ')||'nenhum')}<br>Alterados: ${esc(g.changed.join(', ')||'nenhum')}</small></div>`;
+      modal(`Comparação v${left} × v${right}`,`<div class="grid grid-3">${detail('Cards',groups.nodes)}${detail('Conexões',groups.edges)}${detail('Raias',groups.lanes)}</div><div class="card"><strong>Metadados</strong><p>Fluxo: ${x.flow_changed?'alterado':'sem alteração'} · Configurações: ${x.settings_changed?'alteradas':'sem alteração'}</p></div><pre class="pro-json">${esc(JSON.stringify(diff,null,2))}</pre>`);
+    }catch(e){notify(e.message,'error')}
   });
 
-  $('addLaneBtn').addEventListener('click',()=>{
-    const order=(doc.lanes?.length||0)+1;
-    doc.lanes.push({id:uid('lane'),name:`Raia ${order}`,owner:'',orientation:'horizontal',order,color:'#EAF4FF',collapsed:false,enabled:true,height:260});
-    markDirty();render();
-  });
+  function renderApprovals(){const box=$('approvalHistory');if(!box)return;box.innerHTML=state.approvals.length?state.approvals.map(a=>`<div><strong>${esc(a.from_status)} → ${esc(a.to_status)}</strong><br><small class="muted">${esc(a.created_by)} · ${esc(a.created_at||'')}</small>${a.comment?`<br>${esc(a.comment)}`:''}</div>`).join(''):'<span class="muted">Nenhuma transição registrada.</span>'}
+  qa('[data-transition]').forEach(b=>b.addEventListener('click',async()=>{try{const d=await requestJson(boot.urls.transition,{method:'POST',body:{action:b.dataset.transition,comment:$('governanceComment').value}});state.status=d.transition.to;$('workflowStatusBadge').textContent=state.status;$('workflowStatusBadge').className=`badge status-${state.status}`;state.approvals.unshift({from_status:d.transition.from,to_status:d.transition.to,created_by:boot.username,created_at:new Date().toLocaleString('pt-BR'),comment:$('governanceComment').value});$('governanceComment').value='';renderApprovals();notify('Governança atualizada.','success')}catch(e){notify(e.message,'error')}}));
 
-  $('connectBtn').addEventListener('click',()=>{
-    if (!selectedNodeId) {notify('Selecione um card primeiro.','error');return;}
-    if (!connectSource) {
-      connectSource=selectedNodeId;
-      notify(`Origem selecionada: ${nodeById(connectSource)?.data?.label}. Agora selecione o destino e clique em Conectar.`);
+  function renderSharing(){const v=$('visibilitySelect');if(v)v.value=boot.visibility||'private';const box=$('collaboratorsEditor');if(!box)return;const levels=[['viewer','Visualizador'],['editor','Editor'],['reviewer','Revisor'],['approver','Aprovador']];const current=new Map((boot.collaborators||[]).map(c=>[c.username,c.level]));box.innerHTML=`<div class="stack tight">${(boot.users||[]).filter(u=>u.username!==boot.username).map(u=>`<label class="pro-collab-row"><input type="checkbox" data-collab="${esc(u.username)}" ${current.has(u.username)?'checked':''}><span><strong>${esc(u.name)}</strong><small>@${esc(u.username)}</small></span><select data-collab-level="${esc(u.username)}">${levels.map(([k,l])=>`<option value="${k}" ${current.get(u.username)===k?'selected':''}>${l}</option>`).join('')}</select></label>`).join('')}</div>`}
+  renderSharing();
+  q('[data-action="save-sharing"]')?.addEventListener('click',async()=>{const collaborators=qa('[data-collab]:checked').map(c=>({username:c.dataset.collab,level:q(`[data-collab-level="${CSS.escape(c.dataset.collab)}"]`)?.value||'viewer'}));try{await requestJson(boot.urls.sharing,{method:'POST',body:{visibility:$('visibilitySelect').value,collaborators}});boot.visibility=$('visibilitySelect').value;boot.collaborators=collaborators;notify('Compartilhamento atualizado.','success')}catch(e){notify(e.message,'error')}});
+
+  function renderTemplates(){const box=$('templatesList');if(!box)return;box.innerHTML=state.templates.length?state.templates.map(t=>`<div class="pro-template"><div><strong>${esc(t.category||'Geral')} · ${esc(t.name)}</strong><br><small class="muted">${esc(t.description||'')}</small></div><div class="actions"><button class="btn btn-sm" data-template-create="${esc(t.id)}">Criar fluxo</button>${!t.builtin&&(boot.permission==='owner'||t.owner_username===boot.username||boot.permission==='owner')?`<button class="btn btn-sm btn-danger" data-template-delete="${esc(t.id)}">Excluir</button>`:''}</div></div>`).join(''):'<span class="muted">Nenhum template.</span>';qa('[data-template-create]',box).forEach(b=>b.addEventListener('click',()=>createFromTemplate(b.dataset.templateCreate)));qa('[data-template-delete]',box).forEach(b=>b.addEventListener('click',()=>deleteTemplate(b.dataset.templateDelete)))}
+  q('[data-action="create-template"]')?.addEventListener('click',async()=>{const name=$('templateName').value.trim()||state.doc.flow.name;try{const d=await requestJson(boot.urls.createTemplate,{method:'POST',body:{name,category:$('templateCategory').value||'Geral',description:$('templateDescription').value,document:state.doc,organization:false}});state.templates.push({...d.template,id:d.template._id||d.template.id,builtin:false});renderTemplates();notify('Template salvo.','success')}catch(e){notify(e.message,'error')}});
+  async function createFromTemplate(id){try{const d=await requestJson(boot.urls.createFromTemplate,{method:'POST',body:{template_id:id,project_id:boot.projectId||null}});if(state.dirty){state.pendingNav=d.url;$('navigationModal').hidden=false}else location.href=d.url}catch(e){notify(e.message,'error')}}
+  async function deleteTemplate(id){if(!confirm('Excluir este template?'))return;try{await requestJson(boot.urls.deleteTemplate.replace('__ID__',encodeURIComponent(id)),{method:'DELETE'});state.templates=state.templates.filter(t=>t.id!==id);renderTemplates()}catch(e){notify(e.message,'error')}}
+
+  function graphData(){const ids=visibleNodeIds(),out=new Map(),inc=new Map();state.doc.edges.filter(e=>e.enabled!==false&&ids.has(e.source)&&ids.has(e.target)).forEach(e=>{if(!out.has(e.source))out.set(e.source,[]);out.get(e.source).push(e);if(!inc.has(e.target))inc.set(e.target,[]);inc.get(e.target).push(e)});return{ids,out,inc}}
+  function shortestNodePath(source,target){const {out}=graphData(),queue=[[source,[source],[]]],seen=new Set();while(queue.length){const [id,nodes,edges]=queue.shift();if(id===target)return{nodes,edges};if(seen.has(id))continue;seen.add(id);for(const e of out.get(id)||[])if(!seen.has(e.target))queue.push([e.target,[...nodes,e.target],[...edges,e.id]])}return null}
+  function longestNodePath(source,target=null,limit=4000){const {out}=graphData();let best={nodes:[source],edges:[]},steps=0;const walk=(id,nodes,edges,seen)=>{if(++steps>limit)return;if((!target||id===target)&&nodes.length>best.nodes.length)best={nodes:[...nodes],edges:[...edges]};for(const e of out.get(id)||[]){if(seen.has(e.target))continue;walk(e.target,[...nodes,e.target],[...edges,e.id],new Set([...seen,e.target]))}};walk(source,[source],[],new Set([source]));return target&&!best.nodes.includes(target)?null:best}
+  function preferredPath(source,target=null){const {out}=graphData();const nodes=[source],edges=[],seen=new Set([source]);let current=source;for(let i=0;i<state.doc.nodes.length+5;i++){if(target&&current===target)break;const n=nodeById(current);let options=out.get(current)||[];if(!options.length)break;let e=options.find(x=>x.id===n?.data?.preferredEdgeId)||options[0];if(seen.has(e.target))break;edges.push(e.id);nodes.push(e.target);seen.add(e.target);current=e.target}return target&&current!==target?shortestNodePath(source,target):{nodes,edges}}
+  q('[data-action="route-explorer"]')?.addEventListener('click',()=>{const nodes=visibleNodes();if(nodes.length<2){notify('Crie pelo menos dois cards.','error');return}modal('Explorador de rotas',`<div class="form-grid"><div class="field"><label>Origem</label><select id="routeSource">${nodes.map(n=>`<option value="${esc(n.id)}">${esc(n.data?.label||n.id)}</option>`).join('')}</select></div><div class="field"><label>Destino</label><select id="routeTarget">${nodes.map(n=>`<option value="${esc(n.id)}">${esc(n.data?.label||n.id)}</option>`).join('')}</select></div><div class="field"><label>Estratégia</label><select id="routeStrategy"><option value="shortest">Menor caminho</option><option value="preferred">Decisões preferenciais</option><option value="longest">Maior caminho sem ciclos</option></select></div></div><div class="actions"><button class="btn btn-primary" id="routeApply">Destacar rota</button><button class="btn" id="routePlay">Reproduzir rota</button></div>`,root=>{q('#routeApply',root).onclick=()=>buildRoute(false);q('#routePlay',root).onclick=()=>buildRoute(true)})});
+  function buildRoute(play){const s=$('routeSource').value,t=$('routeTarget').value,str=$('routeStrategy').value;let route=str==='shortest'?shortestNodePath(s,t):str==='longest'?longestNodePath(s,t):preferredPath(s,t);if(!route){notify('Não existe caminho entre os cards escolhidos.','error');return}state.route=route;state.focusNodes=new Set(route.nodes);state.focusEdges=new Set(route.edges);closeModal();render();if(play)startPlayback(route.nodes[0],route)}
+  q('[data-action="focus-path"]')?.addEventListener('click',()=>{if(state.focusNodes){state.focusNodes=null;state.focusEdges=null;state.route=null;render();return}const id=[...state.selectedNodes][0];if(!id){notify('Selecione um card para destacar sua vizinhança.','error');return}const {out,inc}=graphData(),nodes=new Set([id]),edges=new Set(),walk=(start,map,dir)=>{const stack=[start],seen=new Set;while(stack.length){const x=stack.pop();if(seen.has(x))continue;seen.add(x);for(const e of map.get(x)||[]){edges.add(e.id);const n=dir==='out'?e.target:e.source;nodes.add(n);stack.push(n)}}};walk(id,out,'out');walk(id,inc,'in');state.focusNodes=nodes;state.focusEdges=edges;render()});
+
+  async function chooseDecision(node,options){return new Promise(resolve=>{modal(`Decisão: ${node.data?.label||node.id}`,`<p>Escolha a saída para continuar a reprodução.</p><div class="stack">${options.map(e=>`<button class="btn decision-choice" data-edge="${esc(e.id)}"><span>${esc(e.label||e.condition||nodeById(e.target)?.data?.label||'Continuar')}</span><small>${esc(e.condition||'')}</small></button>`).join('')}</div>`,root=>qa('[data-edge]',root).forEach(b=>b.addEventListener('click',()=>{const e=options.find(x=>x.id===b.dataset.edge);closeModal();resolve(e)})))})}
+  async function startPlayback(startId=null,fixedRoute=null){stopPlayback(false);const {out}=graphData();let current=startId||[...state.selectedNodes][0]||visibleNodes().find(n=>n.type==='start')?.id||visibleNodes()[0]?.id;if(!current)return;state.playback.running=true;state.playback.currentNode=current;state.playback.visitedNodes=new Set([current]);state.playback.visitedEdges=new Set();q('[data-action="stop"]').disabled=false;$('playbackOverlay').hidden=false;render();const speed=()=>+$('playSpeed').value||850;let routeIndex=0;
+    const step=async()=>{if(!state.playback.running)return;const node=nodeById(current);$('playbackTitle').textContent=node?.data?.label||'Reproduzindo fluxo';$('playbackProgress').textContent=`${state.playback.visitedNodes.size} etapa(s) percorrida(s)`;if(node?.type==='subprocess'&&node.data?.linkedFlowId){$('playbackProgress').textContent+=' · subprocesso vinculado disponível por duplo clique'}
+      let edge=null;if(fixedRoute){const edgeId=fixedRoute.edges[routeIndex++];edge=edgeId?edgeById(edgeId):null}else{const options=(out.get(current)||[]).filter(e=>e.enabled!==false);if(!options.length){stopPlayback(false);notify('Reprodução concluída.','success');return}if(node?.type==='decision'&&options.length>1&&$('interactivePlay').checked){state.playback.waiting=true;edge=await chooseDecision(node,options);state.playback.waiting=false}else edge=options.find(e=>e.id===node?.data?.preferredEdgeId)||options[0]}
+      if(!edge){stopPlayback(false);notify('Reprodução concluída.','success');return}state.playback.currentEdge=edge.id;state.playback.visitedEdges.add(edge.id);render();state.playback.timer=setTimeout(()=>{current=edge.target;state.playback.currentNode=current;state.playback.currentEdge=null;state.playback.visitedNodes.add(current);render();state.playback.timer=setTimeout(step,speed())},Math.max(180,speed()/2));};state.playback.timer=setTimeout(step,350)}
+  function stopPlayback(clear=true){clearTimeout(state.playback.timer);state.playback.running=false;state.playback.waiting=false;state.playback.currentNode=null;state.playback.currentEdge=null;q('[data-action="stop"]').disabled=true;$('playbackOverlay').hidden=true;if(clear){state.playback.visitedNodes=new Set();state.playback.visitedEdges=new Set()}render()}
+  q('[data-action="play"]')?.addEventListener('click',()=>startPlayback(state.route?.nodes?.[0]||null,state.route));q('[data-action="stop"]')?.addEventListener('click',()=>stopPlayback());
+
+  function openLinkedFlow(node){const id=node.data?.linkedFlowId;if(!id)return;const url=boot.flowUrls?.[id];if(!url){notify('O fluxo vinculado não está acessível neste projeto.','error');return}navigate(url)}
+  function navigate(url){if(state.dirty&&!state.allowNav){state.pendingNav=url;$('navigationModal').hidden=false;return}state.allowNav=true;location.href=url}
+  qa('[data-nav]').forEach(a=>a.addEventListener('click',e=>{if(!state.dirty)return;e.preventDefault();navigate(a.href)}));
+  q('[data-action="nav-cancel"]')?.addEventListener('click',()=>{$('navigationModal').hidden=true;state.pendingNav=null});
+  q('[data-action="nav-leave"]')?.addEventListener('click',()=>{const url=state.pendingNav;state.allowNav=true;$('navigationModal').hidden=true;if(url)location.href=url});
+  q('[data-action="nav-save"]')?.addEventListener('click',async()=>{try{await saveDraft();const url=state.pendingNav;state.allowNav=true;$('navigationModal').hidden=true;if(url)location.href=url}catch(_){}});
+  window.addEventListener('beforeunload',e=>{if(state.dirty&&!state.allowNav){e.preventDefault();e.returnValue=''}});
+
+  async function resolveConflict(action,currentRevision){
+    const d=await requestJson(boot.urls.resolveConflict,{method:'POST',body:{action,document:state.doc,current_revision:currentRevision}});
+    if(action==='copy'){
+      notify('Sua edição foi preservada em uma nova cópia.','success');
+      state.allowNav=true;
+      location.href=d.url;
       return;
     }
-    if (connectSource===selectedNodeId) {notify('Origem e destino não podem ser o mesmo card.','error');return;}
-    const source=nodeById(connectSource);
-    const branch=(doc.edges||[]).filter(e=>e.source===connectSource).length;
-    doc.edges.push({
-      id:uid('edge'),source:connectSource,target:selectedNodeId,
-      sourceHandle:source?.type==='decision'?`branch-${branch}`:'output',targetHandle:'input',
-      type:'step',label:'',condition:'',enabled:true
-    });
-    connectSource=null;markDirty();render();
-  });
-
-  $('deleteSelectedBtn').addEventListener('click',()=>{
-    if (selectedNodeId) {
-      const id=selectedNodeId;
-      doc.nodes=doc.nodes.filter(n=>n.id!==id);
-      doc.edges=doc.edges.filter(e=>e.source!==id&&e.target!==id);
-      selectedNodeId=null;markDirty();render();return;
-    }
-    if (selectedEdgeId) {
-      doc.edges=doc.edges.filter(e=>e.id!==selectedEdgeId);selectedEdgeId=null;markDirty();render();
-    }
-  });
-  $('deleteEdgeBtn').addEventListener('click',()=>{
-    if(!selectedEdgeId)return;doc.edges=doc.edges.filter(e=>e.id!==selectedEdgeId);selectedEdgeId=null;markDirty();render();
-  });
-
-  $('fitBtn').addEventListener('click',()=>{
-    const nodes=doc.nodes||[];
-    if(!nodes.length){scale=1;stage.scrollTo(0,0);render();return;}
-    const minX=Math.min(...nodes.map(n=>Number(n.position.x||0)));
-    const maxX=Math.max(...nodes.map(n=>Number(n.position.x||0)+190));
-    const minY=Math.min(...nodes.map(n=>Number(n.position.y||0)));
-    const maxY=Math.max(...nodes.map(n=>Number(n.position.y||0)+100));
-    const sx=(stage.clientWidth-80)/Math.max(300,maxX-minX);
-    const sy=(stage.clientHeight-80)/Math.max(200,maxY-minY);
-    scale=Math.max(.35,Math.min(1.25,Math.min(sx,sy)));
-    render();
-    stage.scrollTo({left:Math.max(0,minX*scale-30),top:Math.max(0,minY*scale-30),behavior:'smooth'});
-  });
-
-  stage.addEventListener('wheel',e=>{
-    if(!e.ctrlKey)return;
-    e.preventDefault();
-    scale=Math.max(.35,Math.min(1.6,scale+(e.deltaY<0?.08:-.08)));
-    render();
-  },{passive:false});
-
-  $('exportBtn').addEventListener('click',()=>{
-    const blob=new Blob([JSON.stringify(doc,null,2)],{type:'application/json'});
-    const a=document.createElement('a');a.href=URL.createObjectURL(blob);
-    a.download=`${(doc.flow?.name||'fluxo').replace(/[^\w.-]+/g,'_')}.json`;
-    a.click();URL.revokeObjectURL(a.href);
-  });
-
-  $('importInput').addEventListener('change',async e=>{
-    const file=e.target.files?.[0];if(!file)return;
-    try{
-      const raw=JSON.parse(await file.text());
-      const result=await api(boot.urls.import,'POST',{document:raw});
-      if(result.errors?.length){alert('O arquivo ainda possui erros:\n'+result.errors.join('\n'));return;}
-      doc=result.document;
-      markDirty(result.warnings?.length?`Importado com ${result.warnings.length} correção(ões)`:'Importado. Salve para persistir.');
-      render();
-      if(result.warnings?.length)alert(result.warnings.join('\n'));
-    }catch(err){alert('Falha ao importar: '+err.message)}
-    finally{e.target.value=''}
-  });
-
-  $('saveDraftBtn').addEventListener('click',async()=>{
-    try{
-      notify('Salvando rascunho...');
-      await api(boot.urls.draft,'POST',{document:doc,base_revision:revision});
-      markSaved('Rascunho salvo no MongoDB');
-    }catch(err){notify('Falha ao salvar rascunho: '+err.message,'error')}
-  });
-
-  $('loadDraftBtn')?.addEventListener('click',()=>{
-    if(!boot.draft)return;
-    doc=structuredClone(boot.draft);
-    revision=Number(boot.draftBaseRevision||revision);
-    markDirty('Rascunho carregado; salve uma versão para consolidar.');
-    render();
-  });
-
-  $('discardDraftBtn')?.addEventListener('click',async()=>{
-    if(!confirm('Descartar o rascunho salvo no MongoDB?'))return;
-    try{await api(boot.urls.discardDraft,'DELETE');notify('Rascunho descartado.','success');$('loadDraftBtn')?.remove();$('discardDraftBtn')?.remove()}
-    catch(err){notify('Falha ao descartar rascunho: '+err.message,'error')}
-  });
-
-  $('saveBtn').addEventListener('click',async()=>{
-    try{
-      notify('Validando e salvando...');
-      const result=await api(boot.urls.save,'POST',{document:doc,revision,reason:'manual'});
-      revision=Number(result.flow.revision||revision+1);
-      doc=structuredClone(result.flow.document||doc);
-      markSaved(`Versão salva · rev ${revision} · qualidade ${result.analysis?.quality_score ?? '—'}%`);
-      render();
-    }catch(err){
-      if(err.response?.status===409){
-        const current=err.data?.current_revision;
-        notify(`Conflito de revisão. O servidor está na rev ${current}. Recarregue antes de sobrescrever.`,'error');
-        alert(`Conflito de edição: outro usuário salvou o fluxo. Revisão atual no servidor: ${current}. Suas alterações continuam abertas nesta tela para exportação ou comparação.`);
-      }else{
-        const validation=err.data?.errors?Object.values(err.data.errors).flat().join('\n'):'';
-        notify('Falha ao salvar: '+(validation||err.message),'error');
-        if(validation)alert(validation);
-      }
-    }
-  });
-
-  document.querySelectorAll('[data-transition]').forEach(btn=>btn.addEventListener('click',async()=>{
-    if(dirty){alert('Salve ou descarte suas alterações do editor antes de alterar a governança.');return;}
-    try{
-      const result=await api(boot.urls.transition,'POST',{action:btn.dataset.transition,comment:$('governanceComment').value});
-      alert(`Status alterado: ${result.transition.from} → ${result.transition.to}`);
-      location.reload();
-    }catch(err){alert('Não foi possível alterar o status: '+err.message)}
-  }));
-
-  $('addCommentBtn').addEventListener('click',async()=>{
-    const content=$('newComment').value.trim();if(!content)return;
-    try{
-      const targetKind=selectedNodeId?'node':(selectedEdgeId?'edge':'flow');
-      const targetId=selectedNodeId||selectedEdgeId||boot.flowId;
-      const result=await api(boot.urls.comment,'POST',{content,target_kind:targetKind,target_id:targetId});
-      $('newComment').value='';
-      const c=result.comment;
-      const el=document.createElement('div');
-      el.innerHTML=`<strong>@${escapeHtml(c.author)}</strong><br><span>${escapeHtml(c.content)}</span><br><span class="muted">agora · ${escapeHtml(c.target_kind)} ${escapeHtml(c.target_id||'')}</span>`;
-      $('commentsList').prepend(el);
-    }catch(err){alert('Falha ao adicionar comentário: '+err.message)}
-  });
-
-  window.addEventListener('beforeunload',e=>{
-    if(!dirty)return;
-    e.preventDefault();
-    e.returnValue='';
-  });
-
-  function escapeHtml(value) {
-    return String(value ?? '').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[ch]));
+    const flow=d.flow||{};
+    state.doc=normalizeDocument(flow.document||state.doc);
+    state.revision=+flow.revision||state.revision;
+    state.version=+flow.current_version||state.version;
+    state.status=flow.workflow_status||flow.status||state.status;
+    state.dirty=false;
+    notify('Conflito resolvido e sua edição foi gravada como nova versão.','success');
+    setTimeout(()=>location.reload(),500);
   }
-  function attr(value) {return escapeHtml(value).replace(/`/g,'&#096;')}
 
-  render();
+  function showConflictModal(data){
+    const current=+data.current_revision||state.revision;
+    const canOverwrite=boot.permission==='owner';
+    modal('Conflito de revisão',`
+      <div class="alert alert-error"><strong>Outro usuário salvou este fluxo enquanto você editava.</strong><p>O servidor está na revisão <strong>${esc(current)}</strong>. Sua edição continua preservada nesta aba.</p></div>
+      <div class="stack">
+        <button class="btn" id="conflictReload">Carregar versão do servidor e descartar minha edição local</button>
+        <button class="btn" id="conflictCopy">Salvar minha edição como uma nova cópia</button>
+        ${canOverwrite?'<button class="btn btn-primary" id="conflictOverwrite">Sobrescrever a versão atual com minha edição</button>':''}
+        <button class="btn" id="conflictKeep">Continuar editando sem salvar agora</button>
+      </div>
+      <small class="muted">A sobrescrita só é permitida ao proprietário/admin e confirma novamente a revisão atual antes de gravar, evitando apagar uma terceira edição concorrente.</small>
+    `,root=>{
+      q('#conflictReload',root).onclick=()=>{state.allowNav=true;location.reload()};
+      q('#conflictKeep',root).onclick=closeModal;
+      q('#conflictCopy',root).onclick=async()=>{try{await resolveConflict('copy',current)}catch(e){if(e.status===409&&e.data?.conflict)showConflictModal(e.data);else notify(e.message,'error')}};
+      const overwrite=q('#conflictOverwrite',root);if(overwrite)overwrite.onclick=async()=>{try{await resolveConflict('overwrite',current)}catch(e){if(e.status===409&&e.data?.conflict)showConflictModal(e.data);else notify(e.message,'error')}};
+    });
+  }
+
+  async function saveFlow(){
+    if(!boot.editable){notify('Seu nível de acesso não permite salvar.','error');return}
+    try{
+      $('editorStatus').textContent='Salvando…';
+      const d=await requestJson(boot.urls.save,{method:'POST',body:{document:state.doc,revision:state.revision,reason:'manual'}});
+      const flow=d.flow||{};
+      state.doc=normalizeDocument(flow.document||state.doc);
+      state.revision=+flow.revision||state.revision+1;
+      state.version=+flow.current_version||state.version+1;
+      state.status=flow.workflow_status||flow.status||state.status;
+      $('revisionLabel').textContent=state.revision;$('versionLabel').textContent=state.version;$('workflowStatusBadge').textContent=state.status;
+      markSaved('Versão salva');state.history=[];state.future=[];notify('Versão salva no MongoDB.','success');setTimeout(()=>location.reload(),700);
+    }catch(e){
+      if(e.status===409&&e.data?.conflict)showConflictModal(e.data);else notify(e.message,'error');
+    }
+  }
+  async function saveDraft(){if(!boot.editable)throw new Error('Sem permissão para salvar rascunho.');const d=await requestJson(boot.urls.draft,{method:'POST',body:{document:state.doc,base_revision:state.revision}});state.draft=clone(state.doc);state.draftBase=state.revision;notify('Rascunho manual salvo no MongoDB.','success');return d}
+  q('[data-action="save"]')?.addEventListener('click',saveFlow);q('[data-action="save-draft"]')?.addEventListener('click',saveDraft);
+  q('[data-action="load-draft"]')?.addEventListener('click',()=>{if(!state.draft)return;if(state.draftBase!==state.revision){notify('Este rascunho pertence a uma revisão anterior.','error');return}pushHistory();state.doc=normalizeDocument(state.draft);markDirty();render();notify('Rascunho carregado. As mudanças ainda não viraram versão.','success')});
+  q('[data-action="discard-draft"]')?.addEventListener('click',async()=>{if(!confirm('Descartar seu rascunho manual deste fluxo?'))return;try{await requestJson(boot.urls.discardDraft,{method:'DELETE'});state.draft=null;state.draftBase=0;notify('Rascunho descartado.','success');render()}catch(e){notify(e.message,'error')}});
+
+  q('[data-action="validate"]')?.addEventListener('click',async()=>{try{const d=await requestJson(boot.urls.validate,{method:'POST',body:{document:state.doc}});const errors=d.errors||[],a=d.analysis||{};modal('Validação do fluxo',`${errors.length?`<div class="alert alert-error"><strong>${errors.length} inconsistência(s) estrutural(is)</strong><ul>${errors.map(x=>`<li>${esc(x)}</li>`).join('')}</ul></div>`:'<div class="alert alert-success">Estrutura válida.</div>'}${qualityHtml(a)}`)}catch(e){notify(e.message,'error')}});
+  q('[data-action="analytics"]')?.addEventListener('click',async()=>{try{const d=await requestJson(boot.urls.analyze,{method:'POST',body:{document:state.doc}});const a=d.analysis||{},issues=a.issue_details||[];modal('Indicadores e qualidade',`${qualityHtml(a)}<h3>Problemas acionáveis</h3>${issues.length?`<div class="table-wrap"><table><thead><tr><th>Card</th><th>Gravidade</th><th>Problema</th><th>Como corrigir</th></tr></thead><tbody>${issues.map(i=>`<tr><td>${esc(i.Card||i['Card'])}</td><td>${esc(i.Gravidade||i['Gravidade'])}</td><td>${esc(i.Problema||i['Problema'])}</td><td>${esc(i['Como corrigir']||'')}</td></tr>`).join('')}</tbody></table></div>`:'<div class="alert alert-success">Nenhum problema de qualidade identificado.</div>'}<h3>RACI</h3><div class="table-wrap"><table><thead><tr><th>Etapa</th><th>Responsável</th><th>Aprovador</th><th>Consultados</th><th>Informados</th></tr></thead><tbody>${(d.raci||[]).map(r=>`<tr><td>${esc(r.Etapa)}</td><td>${esc(r.Responsável)}</td><td>${esc(r.Aprovador)}</td><td>${esc(r.Consultados)}</td><td>${esc(r.Informados)}</td></tr>`).join('')}</tbody></table></div>`)}catch(e){notify(e.message,'error')}});
+  function qualityHtml(a){const c=a.counts||{},s=a.scores||{};return`<div class="grid grid-5 quality-grid"><div class="card metric"><div class="label">Qualidade</div><div class="value">${esc(a.quality_score??0)}/100</div></div><div class="card metric"><div class="label">Estrutura</div><div class="value">${esc(s.structure??0)}</div></div><div class="card metric"><div class="label">Documentação</div><div class="value">${esc(s.documentation??0)}</div></div><div class="card metric"><div class="label">Responsabilidade</div><div class="value">${esc(s.responsibility??0)}</div></div><div class="card metric"><div class="label">SLA</div><div class="value">${esc(s.sla??0)}</div></div></div><p class="muted">${c.nodes||0} cards · ${c.edges||0} conexões · ${c.lanes||0} raias · ${c.decisions||0} decisões · ${a.issue_count||0} apontamento(s)</p>`}
+
+  $('importInput')?.addEventListener('change',async e=>{const file=e.target.files?.[0];e.target.value='';if(!file)return;try{const raw=JSON.parse(await file.text());const d=await requestJson(boot.urls.import,{method:'POST',body:{document:raw}});pushHistory();state.doc=normalizeDocument(d.document);markDirty();render();if(d.warnings?.length)modal('Importação corrigida',`<p>O arquivo foi importado com ${d.warnings.length} correção(ões) estrutural(is) segura(s).</p><ul>${d.warnings.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`);else notify('JSON importado para o editor. Salve para persistir.','success')}catch(err){notify(`Falha ao importar: ${err.message}`,'error')}});
+
+  qa('[data-export]').forEach(b=>b.addEventListener('click',()=>exportFlow(b.dataset.export)));
+  async function exportFlow(format){const base=`${slug(state.doc.flow.name)}_v${state.version}_rev${state.revision}`;try{if(format==='json'){downloadText(JSON.stringify(state.doc,null,2),`${base}.json`,'application/json;charset=utf-8');return}if(format==='svg-client'){const {blob,disposition}=await postBlob(boot.urls.export.replace('__FORMAT__','svg'),{document:state.doc});downloadBlob(blob,filenameFromDisposition(disposition,`${base}.svg`));return}if(format==='png'){const {blob}=await postBlob(boot.urls.export.replace('__FORMAT__','svg'),{document:state.doc});const svgUrl=URL.createObjectURL(blob),img=new Image();img.onload=()=>{const canvas=document.createElement('canvas');const max=8000,scale=Math.min(2,max/img.width,max/img.height);canvas.width=Math.max(1,img.width*scale);canvas.height=Math.max(1,img.height*scale);const ctx=canvas.getContext('2d');ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.drawImage(img,0,0,canvas.width,canvas.height);canvas.toBlob(p=>{downloadBlob(p,`${base}.png`);URL.revokeObjectURL(svgUrl)},'image/png')};img.onerror=()=>{URL.revokeObjectURL(svgUrl);notify('Não foi possível gerar PNG.','error')};img.src=svgUrl;return}const {blob,disposition}=await postBlob(boot.urls.export.replace('__FORMAT__',format),{document:state.doc});const ext=format==='pdf'||format==='documentation-pdf'?'pdf':format==='html'?'html':format.includes('csv')?'csv':'zip';downloadBlob(blob,filenameFromDisposition(disposition,`${base}.${ext}`))}catch(e){notify(e.message,'error')}}
+
+  function refreshSearch(){const term=$('canvasSearch').value.trim().toLowerCase();if(!term){state.searchResults=[];state.searchIndex=-1;$('searchCount').textContent='';render();return}state.searchResults=visibleNodes().filter(n=>`${n.id} ${n.data?.label||''} ${n.data?.description||''} ${n.data?.owner||''} ${(n.data?.tags||[]).join(' ')} ${laneById(n.laneId)?.name||''}`.toLowerCase().includes(term)).map(n=>n.id);state.searchIndex=state.searchResults.length?0:-1;$('searchCount').textContent=state.searchResults.length?`1/${state.searchResults.length}`:'0';if(state.searchIndex>=0)focusNode(state.searchResults[0])}
+  $('canvasSearch')?.addEventListener('input',refreshSearch);function cycleSearch(dir){if(!state.searchResults.length)return;state.searchIndex=(state.searchIndex+dir+state.searchResults.length)%state.searchResults.length;$('searchCount').textContent=`${state.searchIndex+1}/${state.searchResults.length}`;focusNode(state.searchResults[state.searchIndex])}q('[data-action="search-next"]')?.addEventListener('click',()=>cycleSearch(1));q('[data-action="search-prev"]')?.addEventListener('click',()=>cycleSearch(-1));
+
+  $('viewMode').addEventListener('change',e=>{state.viewMode=e.target.value;localStorage.setItem('fluxos-view-mode',state.viewMode);render()});$('edgeVisibility').addEventListener('change',e=>{state.edgeVisibility=e.target.value;localStorage.setItem('fluxos-edge-visibility',state.edgeVisibility);render()});$('edgeRouting').addEventListener('change',e=>mutate(()=>state.doc.settings.edgeRouting=e.target.value));$('interactivePlay').addEventListener('change',e=>mutate(()=>state.doc.settings.interactivePlayback=e.target.checked));$('showGrid').addEventListener('change',e=>mutate(()=>state.doc.settings.showGrid=e.target.checked));$('snapGrid').addEventListener('change',e=>mutate(()=>state.doc.settings.snapToGrid=e.target.checked));$('showMinimap').addEventListener('change',e=>mutate(()=>state.doc.settings.showMiniMap=e.target.checked));$('autoFitLanes').addEventListener('change',e=>mutate(()=>{state.doc.settings.autoFitLanes=e.target.checked;if(e.target.checked)fitLanes()}));
+
+  function renderPalette(){const term=$('paletteSearch').value.trim().toLowerCase();$('paletteItems').innerHTML=Object.entries(NODE_TYPES).filter(([,m])=>`${m.label} ${m.description}`.toLowerCase().includes(term)).map(([type,m])=>`<button type="button" class="pro-palette-item" draggable="true" data-node-type="${type}" style="--node-color:${m.color};--node-soft:${m.soft}"><span>${m.icon}</span><div><strong>${m.label}</strong><small>${m.description}</small></div></button>`).join('');qa('[data-node-type]',$('paletteItems')).forEach(b=>{b.addEventListener('click',()=>boot.editable&&addNode(b.dataset.nodeType));b.addEventListener('dragstart',e=>e.dataTransfer.setData('text/flow-node-type',b.dataset.nodeType))})}
+  $('paletteSearch')?.addEventListener('input',renderPalette);renderPalette();stage.addEventListener('dragover',e=>{if(e.dataTransfer.types.includes('text/flow-node-type'))e.preventDefault()});stage.addEventListener('drop',e=>{const type=e.dataTransfer.getData('text/flow-node-type');if(!type||!boot.editable)return;e.preventDefault();const r=stage.getBoundingClientRect(),x=(e.clientX-r.left+stage.scrollLeft)/state.scale,y=(e.clientY-r.top+stage.scrollTop)/state.scale;let laneId=null;for(const [id,g] of laneGeometry().map)if(y>=g.top&&y<=g.bottom){laneId=id;break}addNode(type,x-NODE_W/2,y-NODE_H/2,laneId)});
+
+  qa('[data-action]').forEach(b=>{const action=b.dataset.action;if(['close-modal','add-comment','compare-versions','save-sharing','create-template','nav-cancel','nav-leave','nav-save','save','save-draft','load-draft','discard-draft','route-explorer','focus-path','play','stop','search-prev','search-next'].includes(action))return;b.addEventListener('click',()=>{if(action==='undo')undo();if(action==='redo')redo();if(action==='zoom-in')zoomAt(.12);if(action==='zoom-out')zoomAt(-.12);if(action==='zoom-reset'){state.scale=1;render()}if(action==='fit')fitView();if(action==='fullscreen'){const el=$('proEditorPage');if(!document.fullscreenElement)el.requestFullscreen?.();else document.exitFullscreen?.()}if(action==='layout'&&boot.editable)autoLayout();if(action==='add-lane'&&boot.editable)addLane();if(action==='toggle-palette')document.body.classList.toggle('palette-collapsed');if(action==='toggle-inspector')document.body.classList.toggle('inspector-collapsed');if(action==='theme')$('themeToggle')?.click()})});
+
+  window.addEventListener('keydown',e=>{if(e.code==='Space'&&!isInput(e.target)){state.spaceDown=true;e.preventDefault()}if(isInput(e.target))return;if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='a'){e.preventDefault();selectOnly(visibleNodes().map(n=>n.id))}if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='d'){e.preventDefault();if(boot.editable)duplicateSelection()}if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'&&!e.shiftKey){e.preventDefault();undo()}if(((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='y')||((e.ctrlKey||e.metaKey)&&e.shiftKey&&e.key.toLowerCase()==='z')){e.preventDefault();redo()}if((e.key==='Delete'||e.key==='Backspace')&&boot.editable){e.preventDefault();deleteSelection()}if(e.key==='Escape'){state.connectSource=null;state.focusNodes=null;state.focusEdges=null;state.route=null;stopPlayback();render()}});
+  window.addEventListener('keyup',e=>{if(e.code==='Space')state.spaceDown=false});
+  document.addEventListener('fullscreenchange',()=>setTimeout(()=>{fitView()},80));
+
+  function applyFocusFromUrl(){const id=boot.focusNode;if(id&&nodeById(id))setTimeout(()=>focusNode(id),300)}
+  renderSharing();render();applyFocusFromUrl();setTimeout(()=>fitView(),180);
 })();
